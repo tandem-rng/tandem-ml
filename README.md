@@ -3,6 +3,7 @@
 # tandem-ml
 
 [![CI](https://github.com/tandem-rng/tandem-ml/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tandem-rng/tandem-ml/actions/workflows/ci.yml)
+[![Docs](https://img.shields.io/badge/docs-tandem--rng.github.io-7fb3ee.svg)](https://tandem-rng.github.io/tandem-ml/)
 [![License: Apache 2.0](https://img.shields.io/badge/license-Apache_2.0-blue.svg)](LICENSE)
 
 OCaml implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
@@ -27,8 +28,9 @@ let n, worker = Tandem.below worker 1000         (* uniform on [0, 1000), Lemire
 ```
 
 OCaml has no single precision float, so there are no `Float32` draws. See
-[docs/notes.md](docs/notes.md) for the API, tests and speed.
+[API](docs/api.md) for every draw and fill, and [design](docs/design.md),
+[tests](docs/tests.md) and [speed](docs/speed.md) for the rest.
 
 Portions of the code were generated with the assistance of LLMs.
 
-[Documentation](docs/notes.md) · [Apache 2.0 license](LICENSE)
+[Documentation](https://tandem-rng.github.io/tandem-ml/) · [Apache 2.0 license](LICENSE)
