@@ -11,7 +11,6 @@ let make name =
   else if String.starts_with ~prefix:"k1234_" name then Tandem.of_key [| 1; 2; 3; 4 |]
   else Tandem.seed 42
 
-
 let u32_dump name () =
   let bytes = dump name in
   let n = String.length bytes / 4 in
@@ -59,23 +58,6 @@ let f64_dump name () =
   done;
   Alcotest.(check int64) "end position" (Tandem.position filled) (Tandem.position !g)
 
-let f32_dump name () =
-  let bytes = dump name in
-  let n = String.length bytes / 4 in
-  let a = A1.create Bigarray.float32 Bigarray.c_layout n in
-  let fa = Float.Array.create n in
-  let filled = Tandem.fill_float32 (make name) a in
-  ignore (Tandem.Float_array.fill_float32 (make name) fa);
-  let g = ref (make name) in
-  for i = 0 to n - 1 do
-    let want = Int32.float_of_bits (String.get_int32_le bytes (4 * i)) in
-    if a.{i} <> want || Float.Array.get fa i <> want then Alcotest.failf "%s: fill differs at %d" name i;
-    let x, g' = Tandem.float32 !g in
-    g := g';
-    if x <> want then Alcotest.failf "%s: draw differs at %d" name i
-  done;
-  Alcotest.(check int64) "end position" (Tandem.position filled) (Tandem.position !g)
-
 let bool_dump name () =
   let bytes = dump name in
   let g = ref (make name) in
@@ -96,7 +78,6 @@ let () =
           Alcotest.test_case "u32, key 1 2 3 4, K = 32" `Quick (u32_dump "k1234_K32_u32.bin");
           Alcotest.test_case "u64, key 1 2 3 4, K = 32" `Quick (u64_dump "k1234_K32_u64.bin");
           Alcotest.test_case "f64, seed 42" `Quick (f64_dump "seed42_K32_f64.bin");
-          Alcotest.test_case "f32, seed 42" `Quick (f32_dump "seed42_K32_f32.bin");
           Alcotest.test_case "bool, seed 42" `Quick (bool_dump "seed42_K32_bool.bin");
         ] );
     ]

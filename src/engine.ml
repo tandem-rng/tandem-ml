@@ -85,6 +85,8 @@ let f_keyed key ~lo ~hi ~domain ~aux =
   f_lane st 0;
   Array.init 8 (fun i -> st.(((i land 3) lsl 3) + ((i lsr 2) lsl 5)))
 
+(* tandem_stubs.c reads and writes these fields by position: keep their order. [st] has the
+   layout of [o] and [h] in tandem.c's [tandem_rng], so the C fills share this cache. *)
 type ctx = {
   key : int array;
   shift : int;  (* log2 of the chunk length K *)
@@ -115,21 +117,21 @@ let seed_group ctx g =
 
 (* Make [ctx.st] hold row [row]. Stepping forward inside the cached group costs one step per
    row. Any other move reseeds the group. *)
-let load ctx row =
-  if ctx.row <> row then begin
-    let cur = ctx.row in
-    if cur >= 0 && row > cur && row lsr ctx.shift = cur lsr ctx.shift then
-      for _ = cur + 1 to row do
-        step_row ctx.st
-      done
-    else begin
-      seed_group ctx (row lsr ctx.shift);
-      for _ = 0 to row land ((1 lsl ctx.shift) - 1) do
-        step_row ctx.st
-      done
-    end;
-    ctx.row <- row
-  end
+let[@inline never] move ctx row =
+  let cur = ctx.row in
+  if cur >= 0 && row > cur && row lsr ctx.shift = cur lsr ctx.shift then
+    for _ = cur + 1 to row do
+      step_row ctx.st
+    done
+  else begin
+    seed_group ctx (row lsr ctx.shift);
+    for _ = 0 to row land ((1 lsl ctx.shift) - 1) do
+      step_row ctx.st
+    done
+  end;
+  ctx.row <- row
+
+let[@inline] load ctx row = if ctx.row <> row then move ctx row
 
 (* Word [i] of the loaded row in stream order, [i] in 0 to 31. *)
 let[@inline] word ctx i =

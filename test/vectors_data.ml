@@ -17,7 +17,6 @@ let stream = [
   (32, [| 0x9da7bac0; 0x4aca79eb; 0xbeb1f65a; 0xe2f0d5a1 |]);
 ]
 let f64 = [ (0, 0.4296660861094629); (16, 0.2921520424112306) ]
-let f32 = [ (2, 0.58621365) ]
 let bool = [ (0, false); (1, false); (2, false); (3, false); (4, true); (5, false); (6, false); (7, true); (128, true) ]
 let split0 = [| 0xe256e9a1; 0x5020f806; 0x3bd3f7dc; 0x5328763d |]
 let split1 = [| 0xa9ea3f0b; 0x47f97af0; 0xd1844c53; 0x97e9cee2 |]

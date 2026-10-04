@@ -12,7 +12,9 @@
     domain its own generator through {!split}, {!fork} or {!purpose}.
 
     The bounded draws, normals and exponentials of Appendix A are not part of the specification.
-    They follow the shared device core, so that every port returns the same values. *)
+    They follow the shared device core, so that every port returns the same values.
+
+    OCaml has no single precision float, so the library has no [Float32] draws. *)
 
 (** {1 Generators} *)
 
@@ -87,10 +89,6 @@ val u64 : t -> int64 * t
 val float : t -> float * t
 (** A uniform draw in \[0, 1) with 53 bits, from a 64-bit draw. *)
 
-val float32 : t -> float * t
-(** A uniform draw in \[0, 1) with 24 bits, from a 32-bit draw. The OCaml float holds the single
-    precision value exactly. *)
-
 (** {2 Bounded integers}
 
     Lemire's multiply-and-reject method on the uniform draws, a rejected draw being discarded.
@@ -111,9 +109,7 @@ val between : t -> lo:int -> hi:int -> int * t
 (** {2 Normals and exponentials}
 
     Normals follow the Box-Muller transform on two uniforms, exponentials [-ln (1 - u)] on one.
-    The functions copy tandem-c's polynomials with fused multiply-adds, so the values equal
-    tandem-c bit for bit. The [_f32] forms compute in single precision, each operation rounded
-    to single, and return the single precision value in a float. *)
+    The values equal tandem-c bit for bit. *)
 
 val normal : t -> float * t
 (** The cosine half of a pair, from two 64-bit draws. It equals element 0 of {!fill_normal}. *)
@@ -121,10 +117,7 @@ val normal : t -> float * t
 val normal2 : t -> float * float * t
 (** Both halves of a pair, cosine first. *)
 
-val normal_f32 : t -> float * t
-val normal2_f32 : t -> float * float * t
 val exponential : t -> float * t
-val exponential_f32 : t -> float * t
 
 (** {1 Fills}
 
@@ -138,42 +131,46 @@ val exponential_f32 : t -> float * t
 
     @raise Invalid_argument if the range lies outside the array or the fill would pass bit 2^64. *)
 
-type 'k ba = (float, 'k, Bigarray.c_layout) Bigarray.Array1.t
 type u32_array = (int32, Bigarray.int32_elt, Bigarray.c_layout) Bigarray.Array1.t
 type u64_array = (int64, Bigarray.int64_elt, Bigarray.c_layout) Bigarray.Array1.t
+type f64_array = (float, Bigarray.float64_elt, Bigarray.c_layout) Bigarray.Array1.t
 
-val fill_u32 : ?off:int -> ?len:int -> t -> u32_array -> t
-val fill_u64 : ?off:int -> ?len:int -> t -> u64_array -> t
-val fill_float : ?off:int -> ?len:int -> t -> Bigarray.float64_elt ba -> t
-val fill_float32 : ?off:int -> ?len:int -> t -> Bigarray.float32_elt ba -> t
-val fill_normal : ?off:int -> ?len:int -> t -> Bigarray.float64_elt ba -> t
-val fill_normal32 : ?off:int -> ?len:int -> t -> Bigarray.float32_elt ba -> t
-val fill_exponential : ?off:int -> ?len:int -> t -> Bigarray.float64_elt ba -> t
-val fill_exponential32 : ?off:int -> ?len:int -> t -> Bigarray.float32_elt ba -> t
+module type Fills = sig
+  val fill_u32 : ?off:int -> ?len:int -> t -> u32_array -> t
+  val fill_u64 : ?off:int -> ?len:int -> t -> u64_array -> t
+  val fill_float : ?off:int -> ?len:int -> t -> f64_array -> t
+  val fill_normal : ?off:int -> ?len:int -> t -> f64_array -> t
+  val fill_exponential : ?off:int -> ?len:int -> t -> f64_array -> t
 
-val fill_below32 : ?off:int -> ?len:int -> t -> range:int -> u32_array -> t
-(** Element [i] takes draw [i] of the 32-bit fill, which has the global draw index [g]: the aligned
-    start position over 32, plus [i]. A rejected draw retries on the 32-bit draws of
-    [split (purpose t' 0x424c573332) g], with [t'] at position 0. The fill consumes exactly
-    [len] draws. *)
+  val fill_below32 : ?off:int -> ?len:int -> t -> range:int -> u32_array -> t
+  (** Element [i] takes draw [i] of the 32-bit fill, which has the global draw index [g]: the
+      aligned start position over 32, plus [i]. A rejected draw retries on the 32-bit draws of
+      [split (purpose t 0x424c573332) g]. The fill consumes exactly [len] draws. *)
 
-val fill_below64 : ?off:int -> ?len:int -> t -> range:int64 -> u64_array -> t
-(** As {!fill_below32} on 64-bit draws with the purpose [0x424c573634]. *)
+  val fill_below64 : ?off:int -> ?len:int -> t -> range:int64 -> u64_array -> t
+  (** As {!fill_below32} on 64-bit draws with the purpose [0x424c573634]. *)
 
-(** Fills into a [Float.Array]. The values are those of the bigarray fills of the same name. *)
-module Float_array : sig
-  val fill_float : ?off:int -> ?len:int -> t -> Float.Array.t -> t
-  val fill_float32 : ?off:int -> ?len:int -> t -> Float.Array.t -> t
-  val fill_normal : ?off:int -> ?len:int -> t -> Float.Array.t -> t
-  val fill_normal32 : ?off:int -> ?len:int -> t -> Float.Array.t -> t
-  val fill_exponential : ?off:int -> ?len:int -> t -> Float.Array.t -> t
-  val fill_exponential32 : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+  (** Fills into a [Float.Array], with the values of the bigarray fills of the same name. *)
+  module Float_array : sig
+    val fill_float : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+    val fill_normal : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+    val fill_exponential : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+  end
 end
+
+include Fills
+(** The fills run tandem.c, vendored and compiled with the library. *)
+
+module Pure : Fills
+(** The fills in OCaml alone, ten to fifteen times slower. They are the reference that the C
+    fills must equal bit for bit. *)
 
 (** {1 Stateful wrapper}
 
-    The shape of [Random.State], on a mutable generator. A scalar normal or exponential draw
-    keeps nothing between calls, so repeated calls equal the fills. *)
+    The shape of [Random.State], on a mutable position. [bits], [bits32], [bits64], [bool],
+    [int] and [float] allocate nothing. A scalar
+    normal or exponential draw keeps nothing between calls, so repeated calls equal the fills.
+    A state shares the row cache of the generator it came from. *)
 module State : sig
   type g := t
   type t
@@ -183,8 +180,8 @@ module State : sig
   val make_seed : ?chunk_length:int -> int -> t
 
   val make : int array -> t
-  (** One integer is the seed, as for {!seed}. Two integers are the low and high 64 bits of the
-      seed. *)
+  (** [make [|z|]] is {!seed} [z], and each further integer [i] takes [split i] of the generator
+      so far. An empty array acts as [[|0|]]. A negative integer counts modulo 2^64. *)
 
   val copy : t -> t
   val bits : t -> int

@@ -1,8 +1,8 @@
 module A1 = Bigarray.Array1
 
-type 'k ba = (float, 'k, Bigarray.c_layout) A1.t
 type u32_array = (int32, Bigarray.int32_elt, Bigarray.c_layout) A1.t
 type u64_array = (int64, Bigarray.int64_elt, Bigarray.c_layout) A1.t
+type f64_array = (float, Bigarray.float64_elt, Bigarray.c_layout) A1.t
 
 let mask = Engine.mask
 
@@ -57,56 +57,55 @@ let seed ?chunk_length z =
 
 let overflow () = invalid_arg "Tandem: the stream ends at bit 2^64"
 
-(* The position after [bits] more bits, from the aligned low limb [alo], which may be 2^32. *)
-let[@inline] advance t alo bits =
-  let lo2 = alo + bits in
-  let hi2 = t.hi + (lo2 lsr 32) in
+let[@inline] align lo w = (lo + w - 1) land lnot (w - 1)
+
+(* Index of the 32-bit word at the aligned low limb [alo], which may be 2^32. *)
+let[@inline] word_at hi alo = (hi lsl 27) + (alo lsr 5)
+
+(* The high limb after [bits] more bits from [alo]. *)
+let[@inline] end_hi hi alo bits =
+  let hi2 = hi + ((alo + bits) lsr 32) in
   if hi2 > mask then overflow ();
-  { t with hi = hi2; lo = lo2 land mask }
+  hi2
 
-let[@inline] align_lo t w = (t.lo + w - 1) land lnot (w - 1)
-
-(* Index of the 32-bit word at the aligned limb [alo]. *)
-let[@inline] word_index t alo = (t.hi lsl 27) + (alo lsr 5)
+let[@inline] advance t alo bits = { t with hi = end_hi t.hi alo bits; lo = (alo + bits) land mask }
 
 (* ---- Scalar draws -------------------------------------------------------------------- *)
 
+(* Reads at a position, shared by the draws and by [State]. *)
 let[@inline] read32 ctx w =
   Engine.load ctx (w lsr 5);
   Engine.word ctx (w land 31)
 
-let bool t =
-  let w = word_index t t.lo in
-  let b = (read32 t.ctx w lsr (t.lo land 31)) land 1 = 1 in
-  (b, advance t t.lo 1)
+let[@inline] read_bool ctx hi lo = (read32 ctx (word_at hi lo) lsr (lo land 31)) land 1 = 1
 
-let u32 t =
-  let alo = align_lo t 32 in
-  let x = read32 t.ctx (word_index t alo) in
-  (x, advance t alo 32)
-
-let u64 t =
-  let alo = align_lo t 64 in
-  let w = word_index t alo in
-  Engine.load t.ctx (w lsr 5);
+let[@inline] read_u64 ctx hi alo =
+  let w = word_at hi alo in
+  Engine.load ctx (w lsr 5);
   let i = w land 31 in
-  let lo = Engine.word t.ctx i and hi = Engine.word t.ctx (i + 1) in
-  (Int64.logor (Int64.of_int lo) (Int64.shift_left (Int64.of_int hi) 32), advance t alo 64)
+  Int64.logor (Int64.of_int (Engine.word ctx i)) (Int64.shift_left (Int64.of_int (Engine.word ctx (i + 1))) 32)
 
 let[@inline] to_f64 lo hi = float_of_int ((hi lsl 21) lor (lo lsr 11)) *. 0x1p-53
-let[@inline] to_f32 x = float_of_int (x lsr 8) *. 0x1p-24
 
-let float t =
-  let alo = align_lo t 64 in
-  let w = word_index t alo in
-  Engine.load t.ctx (w lsr 5);
+let[@inline] read_f64 ctx hi alo =
+  let w = word_at hi alo in
+  Engine.load ctx (w lsr 5);
   let i = w land 31 in
-  (to_f64 (Engine.word t.ctx i) (Engine.word t.ctx (i + 1)), advance t alo 64)
+  to_f64 (Engine.word ctx i) (Engine.word ctx (i + 1))
 
-let float32 t =
-  let alo = align_lo t 32 in
-  let x = read32 t.ctx (word_index t alo) in
-  (to_f32 x, advance t alo 32)
+let[@inline] bool t = (read_bool t.ctx t.hi t.lo, advance t t.lo 1)
+
+let[@inline] u32 t =
+  let alo = align t.lo 32 in
+  (read32 t.ctx (word_at t.hi alo), advance t alo 32)
+
+let[@inline] u64 t =
+  let alo = align t.lo 64 in
+  (read_u64 t.ctx t.hi alo, advance t alo 64)
+
+let[@inline] float t =
+  let alo = align t.lo 64 in
+  (read_f64 t.ctx t.hi alo, advance t alo 64)
 
 (* ---- Derived generators -------------------------------------------------------------- *)
 
@@ -209,43 +208,38 @@ let between t ~lo ~hi =
 
 (* ---- Normals and exponentials, scalar ------------------------------------------------ *)
 
-let scratch_key = Domain.DLS.new_key Box.make_scratch
-
 let normal2 t =
   let a, t = float t in
   let b, t = float t in
-  let z = Float.Array.of_list [ a; b ] in
-  Box.normal_block_f64 z 0 1;
-  (Float.Array.get z 0, Float.Array.get z 1, t)
+  let x, y = Box.pair a b in
+  (x, y, t)
 
 let normal t =
-  let z0, _, t = normal2 t in
-  (z0, t)
-
-let normal2_f32 t =
-  let a, t = float32 t in
-  let b, t = float32 t in
-  let z = Float.Array.of_list [ a; b ] in
-  Box.normal_block_f32 (Domain.DLS.get scratch_key) z 0 1;
-  (Float.Array.get z 0, Float.Array.get z 1, t)
-
-let normal_f32 t =
-  let z0, _, t = normal2_f32 t in
-  (z0, t)
+  let a, t = float t in
+  let b, t = float t in
+  (fst (Box.pair a b), t)
 
 let exponential t =
   let u, t = float t in
-  let z = Float.Array.make 1 u in
-  Box.exponential_block_f64 z 0 1;
-  (Float.Array.get z 0, t)
-
-let exponential_f32 t =
-  let u, t = float32 t in
-  let z = Float.Array.make 1 u in
-  Box.exponential_block_f32 (Domain.DLS.get scratch_key) z 0 1;
-  (Float.Array.get z 0, t)
+  (Box.exponential u, t)
 
 (* ---- Fills --------------------------------------------------------------------------- *)
+
+module type Fills = sig
+  val fill_u32 : ?off:int -> ?len:int -> t -> u32_array -> t
+  val fill_u64 : ?off:int -> ?len:int -> t -> u64_array -> t
+  val fill_float : ?off:int -> ?len:int -> t -> f64_array -> t
+  val fill_normal : ?off:int -> ?len:int -> t -> f64_array -> t
+  val fill_exponential : ?off:int -> ?len:int -> t -> f64_array -> t
+  val fill_below32 : ?off:int -> ?len:int -> t -> range:int -> u32_array -> t
+  val fill_below64 : ?off:int -> ?len:int -> t -> range:int64 -> u64_array -> t
+
+  module Float_array : sig
+    val fill_float : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+    val fill_normal : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+    val fill_exponential : ?off:int -> ?len:int -> t -> Float.Array.t -> t
+  end
+end
 
 let range_of name dim off len =
   let off = Option.value off ~default:0 in
@@ -253,247 +247,266 @@ let range_of name dim off len =
   if off < 0 || len < 0 || off > dim - len then invalid_arg ("Tandem." ^ name ^ ": the range is outside the array");
   (off, len)
 
-(* Rows of a fill of [n] elements of [32 lsl sh] bits from the 32-bit word [word0], which is a
-   multiple of the element width. [f first count dst] writes [count] elements, the first at
-   index [first] of the loaded row and the first output at [dst]. *)
-let iter_rows ctx ~word0 ~sh ~n f =
-  let per = 32 lsr sh in
-  let i = ref 0 and w = ref word0 in
-  while !i < n do
-    Engine.load ctx (!w lsr 5);
-    let first = (!w land 31) lsr sh in
-    let cnt = min (per - first) (n - !i) in
-    f first cnt !i;
-    i := !i + cnt;
-    w := !w + (cnt lsl sh)
-  done
+let check_range32 name range =
+  if range < 0 || range > 1 lsl 32 then invalid_arg ("Tandem." ^ name ^ ": the range is 0 to 2^32")
 
-(* Align, check the end of the fill against 2^64, and run [f] on the words. Returns the
-   position after the fill. An empty fill returns the aligned position. *)
+(* Align, check the end of a fill of [n] draws of [w] bits against 2^64, and run [f] on the
+   index of its first 32-bit word. Returns the position after the fill. An empty fill returns
+   the aligned position. *)
 let fill_with t ~w ~n f =
   if n > 1 lsl 55 then overflow ();
-  let alo = align_lo t w in
+  let alo = align t.lo w in
   let t' = advance t alo (n * w) in
-  if n > 0 then f ~word0:(word_index t alo);
+  if n > 0 then f (word_at t.hi alo);
   t'
+
+(* A normal fill of [n] elements consumes [2 * ceil (n / 2)] uniforms. *)
+let normal_draws n = 2 * ((n + 1) / 2)
+
+module Pure = struct
+  (* Rows of a fill of [n] elements of [32 lsl sh] bits from the 32-bit word [word0], which is
+     a multiple of the element width. [f first count dst] writes [count] elements, the first at
+     index [first] of the loaded row and the first output at [dst]. *)
+  let iter_rows ctx ~word0 ~sh ~n f =
+    let per = 32 lsr sh in
+    let i = ref 0 and w = ref word0 in
+    while !i < n do
+      Engine.load ctx (!w lsr 5);
+      let first = (!w land 31) lsr sh in
+      let cnt = min (per - first) (n - !i) in
+      f first cnt !i;
+      i := !i + cnt;
+      w := !w + (cnt lsl sh)
+    done
+
+  let fill_u32 ?off ?len t (a : u32_array) =
+    let off, n = range_of "fill_u32" (A1.dim a) off len in
+    fill_with t ~w:32 ~n (fun word0 ->
+        iter_rows t.ctx ~word0 ~sh:0 ~n (fun first cnt dst ->
+            for k = 0 to cnt - 1 do
+              A1.unsafe_set a (off + dst + k) (Int32.of_int (Engine.word t.ctx (first + k)))
+            done))
+
+  let fill_u64 ?off ?len t (a : u64_array) =
+    let off, n = range_of "fill_u64" (A1.dim a) off len in
+    fill_with t ~w:64 ~n (fun word0 ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+            for k = 0 to cnt - 1 do
+              let e = (first + k) lsl 1 in
+              let lo = Engine.word t.ctx e and hi = Engine.word t.ctx (e + 1) in
+              A1.unsafe_set a (off + dst + k)
+                (Int64.logor (Int64.of_int lo) (Int64.shift_left (Int64.of_int hi) 32))
+            done))
+
+  let fill_float ?off ?len t (a : f64_array) =
+    let off, n = range_of "fill_float" (A1.dim a) off len in
+    fill_with t ~w:64 ~n (fun word0 ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+            for k = 0 to cnt - 1 do
+              let e = (first + k) lsl 1 in
+              A1.unsafe_set a (off + dst + k) (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
+            done))
+
+  (* The same on a [Float.Array] region that the caller checked. *)
+  let uniforms t (a : Float.Array.t) off n =
+    fill_with t ~w:64 ~n (fun word0 ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+            for k = 0 to cnt - 1 do
+              let e = (first + k) lsl 1 in
+              Float.Array.unsafe_set a (off + dst + k)
+                (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
+            done))
+
+  (* Derived fills draw the uniforms in blocks that stay in cache and map them in place. An
+     empty one moves nothing. *)
+  let block = 1024
+
+  let normals t a off n =
+    if n = 0 then t
+    else begin
+      let t = ref t and at = ref 0 in
+      let even = n land lnot 1 in
+      while !at < even do
+        let b = min block (even - !at) in
+        t := uniforms !t a (off + !at) b;
+        Box.normal_block a (off + !at) (b / 2);
+        at := !at + b
+      done;
+      if n land 1 = 1 then begin
+        let x, t' = normal !t in
+        t := t';
+        Float.Array.set a (off + n - 1) x
+      end;
+      !t
+    end
+
+  let exponentials t a off n =
+    let t = ref t and at = ref 0 in
+    while !at < n do
+      let b = min block (n - !at) in
+      t := uniforms !t a (off + !at) b;
+      Box.exponential_block a (off + !at) b;
+      at := !at + b
+    done;
+    !t
+
+  module Float_array = struct
+    let fill_float ?off ?len t a =
+      let off, n = range_of "fill_float" (Float.Array.length a) off len in
+      uniforms t a off n
+
+    let fill_normal ?off ?len t a =
+      let off, n = range_of "fill_normal" (Float.Array.length a) off len in
+      normals t a off n
+
+    let fill_exponential ?off ?len t a =
+      let off, n = range_of "fill_exponential" (Float.Array.length a) off len in
+      exponentials t a off n
+  end
+
+  (* A bigarray target goes through a block of floats. *)
+  let via_floats map t (a : f64_array) off n =
+    let floats = Float.Array.create (min block n) in
+    let t = ref t and at = ref 0 in
+    while !at < n do
+      let b = min block (n - !at) in
+      t := map !t floats 0 b;
+      for i = 0 to b - 1 do
+        A1.unsafe_set a (off + !at + i) (Float.Array.unsafe_get floats i)
+      done;
+      at := !at + b
+    done;
+    !t
+
+  let fill_normal ?off ?len t (a : f64_array) =
+    let off, n = range_of "fill_normal" (A1.dim a) off len in
+    if n = 0 then t else via_floats normals t a off n
+
+  let fill_exponential ?off ?len t (a : f64_array) =
+    let off, n = range_of "fill_exponential" (A1.dim a) off len in
+    if n = 0 then t else via_floats exponentials t a off n
+
+  (* A rejected draw retries on the fallback stream of its global draw index [g]. *)
+  let fallback t p g = split (purpose t p) g
+
+  let fill_below32 ?off ?len t ~range (a : u32_array) =
+    check_range32 "fill_below32" range;
+    let off, n = range_of "fill_below32" (A1.dim a) off len in
+    if n = 0 then t
+    else begin
+      let g0 = word_at t.hi (align t.lo 32) in
+      let t' = fill_u32 ~off ~len:n t a in
+      if range = 0 then A1.fill (A1.sub a off n) 0l
+      else begin
+        let rejected = ((1 lsl 32) - range) mod range in
+        for i = 0 to n - 1 do
+          let x = Int32.to_int (A1.unsafe_get a (off + i)) land mask in
+          let m = Int64.mul (Int64.of_int x) (Int64.of_int range) in
+          let v =
+            if Int64.to_int m land mask >= rejected then Int64.to_int (Int64.shift_right_logical m 32)
+            else fst (below32 (fallback t purpose_below32 (g0 + i)) range)
+          in
+          A1.unsafe_set a (off + i) (Int32.of_int v)
+        done
+      end;
+      t'
+    end
+
+  let fill_below64 ?off ?len t ~range (a : u64_array) =
+    let off, n = range_of "fill_below64" (A1.dim a) off len in
+    if n = 0 then t
+    else begin
+      let g0 = word_at t.hi (align t.lo 64) lsr 1 in
+      let t' = fill_u64 ~off ~len:n t a in
+      if Int64.equal range 0L then A1.fill (A1.sub a off n) 0L
+      else begin
+        let rejected = Int64.unsigned_rem (Int64.neg range) range in
+        for i = 0 to n - 1 do
+          let x = A1.unsafe_get a (off + i) in
+          let v =
+            if Int64.unsigned_compare (Int64.mul x range) rejected >= 0 then mulhi64 x range
+            else fst (below64 (fallback t purpose_below64 (g0 + i)) range)
+          in
+          A1.unsafe_set a (off + i) v
+        done
+      end;
+      t'
+    end
+end
+
+(* The C fills of tandem.c, over the generator's row cache. *)
+external c_fill_u32 : Engine.ctx -> (int[@untagged]) -> u32_array -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_u32_byte" "tandem_ml_fill_u32" [@@noalloc]
+external c_fill_u64 : Engine.ctx -> (int[@untagged]) -> u64_array -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_u64_byte" "tandem_ml_fill_u64" [@@noalloc]
+external c_fill_f64 : Engine.ctx -> (int[@untagged]) -> f64_array -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_f64_byte" "tandem_ml_fill_f64" [@@noalloc]
+external c_fill_normal : Engine.ctx -> (int[@untagged]) -> f64_array -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_normal_byte" "tandem_ml_fill_normal" [@@noalloc]
+external c_fill_exponential :
+  Engine.ctx -> (int[@untagged]) -> f64_array -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_exponential_byte" "tandem_ml_fill_exponential" [@@noalloc]
+external c_fill_f64_fa :
+  Engine.ctx -> (int[@untagged]) -> Float.Array.t -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_f64_fa_byte" "tandem_ml_fill_f64_fa" [@@noalloc]
+external c_fill_normal_fa :
+  Engine.ctx -> (int[@untagged]) -> Float.Array.t -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_normal_fa_byte" "tandem_ml_fill_normal_fa" [@@noalloc]
+external c_fill_exponential_fa :
+  Engine.ctx -> (int[@untagged]) -> Float.Array.t -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_exponential_fa_byte" "tandem_ml_fill_exponential_fa" [@@noalloc]
+external c_fill_below32 :
+  Engine.ctx -> (int[@untagged]) -> u32_array -> (int[@untagged]) -> (int[@untagged]) -> (int[@untagged]) -> unit
+  = "tandem_ml_fill_below32_byte" "tandem_ml_fill_below32" [@@noalloc]
+external c_fill_below64 :
+  Engine.ctx -> (int[@untagged]) -> u64_array -> (int[@untagged]) -> (int[@untagged]) -> (int64[@unboxed]) -> unit
+  = "tandem_ml_fill_below64_byte" "tandem_ml_fill_below64" [@@noalloc]
 
 let fill_u32 ?off ?len t (a : u32_array) =
   let off, n = range_of "fill_u32" (A1.dim a) off len in
-  fill_with t ~w:32 ~n (fun ~word0 ->
-      iter_rows t.ctx ~word0 ~sh:0 ~n (fun first cnt dst ->
-          for k = 0 to cnt - 1 do
-            A1.unsafe_set a (off + dst + k) (Int32.of_int (Engine.word t.ctx (first + k)))
-          done))
+  fill_with t ~w:32 ~n (fun word0 -> c_fill_u32 t.ctx word0 a off n)
 
 let fill_u64 ?off ?len t (a : u64_array) =
   let off, n = range_of "fill_u64" (A1.dim a) off len in
-  fill_with t ~w:64 ~n (fun ~word0 ->
-      iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
-          for k = 0 to cnt - 1 do
-            let e = (first + k) lsl 1 in
-            let lo = Engine.word t.ctx e and hi = Engine.word t.ctx (e + 1) in
-            A1.unsafe_set a (off + dst + k)
-              (Int64.logor (Int64.of_int lo) (Int64.shift_left (Int64.of_int hi) 32))
-          done))
+  fill_with t ~w:64 ~n (fun word0 -> c_fill_u64 t.ctx word0 a off n)
 
-let fill_f64_bigarray ?off ?len t (a : Bigarray.float64_elt ba) =
+let fill_float ?off ?len t (a : f64_array) =
   let off, n = range_of "fill_float" (A1.dim a) off len in
-  fill_with t ~w:64 ~n (fun ~word0 ->
-      iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
-          for k = 0 to cnt - 1 do
-            let e = (first + k) lsl 1 in
-            A1.unsafe_set a (off + dst + k) (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
-          done))
+  fill_with t ~w:64 ~n (fun word0 -> c_fill_f64 t.ctx word0 a off n)
 
-let fill_f32_bigarray ?off ?len t (a : Bigarray.float32_elt ba) =
-  let off, n = range_of "fill_float32" (A1.dim a) off len in
-  fill_with t ~w:32 ~n (fun ~word0 ->
-      iter_rows t.ctx ~word0 ~sh:0 ~n (fun first cnt dst ->
-          for k = 0 to cnt - 1 do
-            A1.unsafe_set a (off + dst + k) (to_f32 (Engine.word t.ctx (first + k)))
-          done))
-
-(* The same on a [Float.Array] region. [off] and [n] are checked by the caller. *)
-let fa_f64 t (a : Float.Array.t) off n =
-  fill_with t ~w:64 ~n (fun ~word0 ->
-      iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
-          for k = 0 to cnt - 1 do
-            let e = (first + k) lsl 1 in
-            Float.Array.unsafe_set a (off + dst + k)
-              (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
-          done))
-
-let fa_f32 t (a : Float.Array.t) off n =
-  fill_with t ~w:32 ~n (fun ~word0 ->
-      iter_rows t.ctx ~word0 ~sh:0 ~n (fun first cnt dst ->
-          for k = 0 to cnt - 1 do
-            Float.Array.unsafe_set a (off + dst + k) (to_f32 (Engine.word t.ctx (first + k)))
-          done))
-
-(* Derived fills draw the uniforms in blocks that stay in cache and map them in place. An
-   empty one moves nothing. *)
-let block = 1024
-
-let normal_region ~wide t a off n =
-  if n = 0 then t
-  else begin
-    let uniform = if wide then fa_f64 else fa_f32 in
-    let sc = Domain.DLS.get scratch_key in
-    let map z o m = if wide then Box.normal_block_f64 z o m else Box.normal_block_f32 sc z o m in
-    let t = ref t and at = ref 0 in
-    let even = n land lnot 1 in
-    while !at < even do
-      let b = min block (even - !at) in
-      t := uniform !t a (off + !at) b;
-      map a (off + !at) (b / 2);
-      at := !at + b
-    done;
-    if n land 1 = 1 then begin
-      let pair = Float.Array.create 2 in
-      t := uniform !t pair 0 2;
-      map pair 0 1;
-      Float.Array.set a (off + n - 1) (Float.Array.get pair 0)
-    end;
-    !t
-  end
-
-let exponential_region ~wide t a off n =
-  let uniform = if wide then fa_f64 else fa_f32 in
-  let sc = Domain.DLS.get scratch_key in
-  let t = ref t and at = ref 0 in
-  while !at < n do
-    let b = min block (n - !at) in
-    t := uniform !t a (off + !at) b;
-    if wide then Box.exponential_block_f64 a (off + !at) b else Box.exponential_block_f32 sc a (off + !at) b;
-    at := !at + b
-  done;
-  !t
-
-module Float_array = struct
-  let region name a off len =
-    range_of name (Float.Array.length a) off len
-
-  let fill_float ?off ?len t a =
-    let off, n = region "fill_float" a off len in
-    fa_f64 t a off n
-
-  let fill_float32 ?off ?len t a =
-    let off, n = region "fill_float32" a off len in
-    fa_f32 t a off n
-
-  let fill_normal ?off ?len t a =
-    let off, n = region "fill_normal" a off len in
-    normal_region ~wide:true t a off n
-
-  let fill_normal32 ?off ?len t a =
-    let off, n = region "fill_normal32" a off len in
-    normal_region ~wide:false t a off n
-
-  let fill_exponential ?off ?len t a =
-    let off, n = region "fill_exponential" a off len in
-    exponential_region ~wide:true t a off n
-
-  let fill_exponential32 ?off ?len t a =
-    let off, n = region "fill_exponential32" a off len in
-    exponential_region ~wide:false t a off n
-end
-
-let fill_float = fill_f64_bigarray
-let fill_float32 = fill_f32_bigarray
-
-(* A bigarray target goes through a block of floats. The bigarray stores are written out for
-   each kind, because the compiler inlines them only for a known kind. *)
-let via_scratch region t n copy =
-  let scratch = Float.Array.create (min block n) in
-  let t = ref t and at = ref 0 in
-  while !at < n do
-    let b = min block (n - !at) in
-    t := region !t scratch 0 b;
-    copy scratch !at b;
-    at := !at + b
-  done;
-  !t
-
-let copy64 (a : Bigarray.float64_elt ba) off scratch at b =
-  for i = 0 to b - 1 do
-    A1.unsafe_set a (off + at + i) (Float.Array.unsafe_get scratch i)
-  done
-
-let copy32 (a : Bigarray.float32_elt ba) off scratch at b =
-  for i = 0 to b - 1 do
-    A1.unsafe_set a (off + at + i) (Float.Array.unsafe_get scratch i)
-  done
-
-let fill_normal ?off ?len t (a : Bigarray.float64_elt ba) =
+let fill_normal ?off ?len t (a : f64_array) =
   let off, n = range_of "fill_normal" (A1.dim a) off len in
-  if n = 0 then t else via_scratch (normal_region ~wide:true) t n (copy64 a off)
+  if n = 0 then t else fill_with t ~w:64 ~n:(normal_draws n) (fun word0 -> c_fill_normal t.ctx word0 a off n)
 
-let fill_normal32 ?off ?len t (a : Bigarray.float32_elt ba) =
-  let off, n = range_of "fill_normal32" (A1.dim a) off len in
-  if n = 0 then t else via_scratch (normal_region ~wide:false) t n (copy32 a off)
-
-let fill_exponential ?off ?len t (a : Bigarray.float64_elt ba) =
+let fill_exponential ?off ?len t (a : f64_array) =
   let off, n = range_of "fill_exponential" (A1.dim a) off len in
-  if n = 0 then t else via_scratch (exponential_region ~wide:true) t n (copy64 a off)
+  if n = 0 then t else fill_with t ~w:64 ~n (fun word0 -> c_fill_exponential t.ctx word0 a off n)
 
-let fill_exponential32 ?off ?len t (a : Bigarray.float32_elt ba) =
-  let off, n = range_of "fill_exponential32" (A1.dim a) off len in
-  if n = 0 then t else via_scratch (exponential_region ~wide:false) t n (copy32 a off)
-
-(* ---- Bounded fills ------------------------------------------------------------------- *)
-
-(* A rejected draw retries on the fallback stream of its global draw index [g]. *)
-let fallback t p g = split (purpose { t with hi = 0; lo = 0 } p) g
-
+(* tandem.c takes ranges below 2^32. A range of 2^32 maps every draw to itself. *)
 let fill_below32 ?off ?len t ~range (a : u32_array) =
-  if range < 0 || range > 1 lsl 32 then invalid_arg "Tandem.fill_below32: the range is 0 to 2^32";
+  check_range32 "fill_below32" range;
   let off, n = range_of "fill_below32" (A1.dim a) off len in
   if n = 0 then t
-  else begin
-    let g0 = word_index t (align_lo t 32) in
-    let t' = fill_u32 ~off ~len:n t a in
-    if range = 0 then
-      for i = off to off + n - 1 do
-        A1.unsafe_set a i 0l
-      done
-    else begin
-      let rejected = ((1 lsl 32) - range) mod range in
-      for i = 0 to n - 1 do
-        let x = Int32.to_int (A1.unsafe_get a (off + i)) land mask in
-        let m = Int64.mul (Int64.of_int x) (Int64.of_int range) in
-        let v =
-          if Int64.to_int m land mask >= rejected then Int64.to_int (Int64.shift_right_logical m 32)
-          else fst (below32 (fallback t purpose_below32 (g0 + i)) range)
-        in
-        A1.unsafe_set a (off + i) (Int32.of_int v)
-      done
-    end;
-    t'
-  end
+  else if range = 1 lsl 32 then fill_u32 ~off ~len:n t a
+  else fill_with t ~w:32 ~n (fun word0 -> c_fill_below32 t.ctx word0 a off n range)
 
 let fill_below64 ?off ?len t ~range (a : u64_array) =
   let off, n = range_of "fill_below64" (A1.dim a) off len in
-  if n = 0 then t
-  else begin
-    let g0 = word_index t (align_lo t 64) lsr 1 in
-    let t' = fill_u64 ~off ~len:n t a in
-    if Int64.equal range 0L then
-      for i = off to off + n - 1 do
-        A1.unsafe_set a i 0L
-      done
-    else begin
-      let rejected = Int64.unsigned_rem (Int64.neg range) range in
-      for i = 0 to n - 1 do
-        let x = A1.unsafe_get a (off + i) in
-        let v =
-          if Int64.unsigned_compare (Int64.mul x range) rejected >= 0 then mulhi64 x range
-          else fst (below64 (fallback t purpose_below64 (g0 + i)) range)
-        in
-        A1.unsafe_set a (off + i) v
-      done
-    end;
-    t'
-  end
+  if n = 0 then t else fill_with t ~w:64 ~n (fun word0 -> c_fill_below64 t.ctx word0 a off n range)
+
+module Float_array = struct
+  let fill_float ?off ?len t a =
+    let off, n = range_of "fill_float" (Float.Array.length a) off len in
+    fill_with t ~w:64 ~n (fun word0 -> c_fill_f64_fa t.ctx word0 a off n)
+
+  let fill_normal ?off ?len t a =
+    let off, n = range_of "fill_normal" (Float.Array.length a) off len in
+    if n = 0 then t else fill_with t ~w:64 ~n:(normal_draws n) (fun word0 -> c_fill_normal_fa t.ctx word0 a off n)
+
+  let fill_exponential ?off ?len t a =
+    let off, n = range_of "fill_exponential" (Float.Array.length a) off len in
+    if n = 0 then t else fill_with t ~w:64 ~n (fun word0 -> c_fill_exponential_fa t.ctx word0 a off n)
+end
 
 (* ---- Specification building blocks --------------------------------------------------- *)
 
@@ -527,33 +540,80 @@ end
 
 module State = struct
   type g = t
-  type t = { mutable g : g }
+  type t = { ctx : Engine.ctx; mutable hi : int; mutable lo : int }
 
-  let of_generator g = { g }
-  let generator s = s.g
-  let make_seed ?chunk_length z = { g = seed ?chunk_length z }
+  let of_generator (g : g) = { ctx = g.ctx; hi = g.hi; lo = g.lo }
+  let generator s : g = { ctx = s.ctx; hi = s.hi; lo = s.lo }
+  let make_seed ?chunk_length z = of_generator (seed ?chunk_length z)
 
   let make a =
-    let n = Array.length a in
-    if n < 1 || n > 2 then invalid_arg "Tandem.State.make: one or two seed integers";
-    { g = seed_u128 (Int64.of_int a.(0)) (if n = 2 then Int64.of_int a.(1) else 0L) }
+    let first = if Array.length a = 0 then 0L else Int64.of_int a.(0) in
+    let g = ref (seed_u128 first 0L) in
+    for i = 1 to Array.length a - 1 do
+      g := split_u64 !g (Int64.of_int a.(i))
+    done;
+    of_generator !g
 
-  let copy s = { g = s.g }
+  let copy s = { s with hi = s.hi }
 
-  let draw s f =
-    let x, g = f s.g in
-    s.g <- g;
+  let[@inline] set s (g : g) =
+    s.hi <- g.hi;
+    s.lo <- g.lo
+
+  (* The draws below move the position in place, so that they allocate nothing. *)
+  let[@inline] move s alo w =
+    s.hi <- end_hi s.hi alo w;
+    s.lo <- (alo + w) land mask
+
+  let[@inline] next32 s =
+    let alo = align s.lo 32 in
+    let x = read32 s.ctx (word_at s.hi alo) in
+    move s alo 32;
     x
 
-  let bits32 s = Int32.of_int (draw s u32)
-  let bits64 s = draw s u64
-  let bits s = draw s u32 lsr 2
-  let bool s = draw s bool
-  let float s scale = scale *. draw s float
+  let[@inline] next_float s =
+    let alo = align s.lo 64 in
+    let x = read_f64 s.ctx s.hi alo in
+    move s alo 64;
+    x
 
+  let[@inline] bits s = next32 s lsr 2
+  let[@inline] bits32 s = Int32.of_int (next32 s)
+
+  let[@inline] bits64 s =
+    let alo = align s.lo 64 in
+    let x = read_u64 s.ctx s.hi alo in
+    move s alo 64;
+    x
+
+  let[@inline] bool s =
+    let x = read_bool s.ctx s.hi s.lo in
+    move s s.lo 1;
+    x
+
+  let[@inline] float s scale = scale *. next_float s
+
+  let normal s =
+    let a = next_float s in
+    let b = next_float s in
+    fst (Box.pair a b)
+
+  let exponential s = Box.exponential (next_float s)
+
+  (* [below32] for a bound below 2^30, whose products fit in an int. *)
   let int s bound =
     if bound <= 0 || bound > 0x3fff_ffff then invalid_arg "Random.int";
-    draw s (fun g -> below32 g bound)
+    let rejected = ((1 lsl 32) - bound) mod bound in
+    let m = ref (next32 s * bound) in
+    while !m land mask < rejected do
+      m := next32 s * bound
+    done;
+    !m lsr 32
+
+  let draw s f =
+    let x, g = f (generator s) in
+    set s g;
+    x
 
   let full_int s bound =
     if bound <= 0 then invalid_arg "Random.full_int";
@@ -567,11 +627,8 @@ module State = struct
     if Int64.compare bound 0L <= 0 then invalid_arg "Random.int64";
     draw s (fun g -> below64 g bound)
 
-  let normal s = draw s normal
-  let exponential s = draw s exponential
-
   let split s =
-    let g, kids = fork s.g 1 in
-    s.g <- g;
-    { g = kids.(0) }
+    let g, kids = fork (generator s) 1 in
+    set s g;
+    of_generator kids.(0)
 end

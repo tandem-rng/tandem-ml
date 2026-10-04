@@ -3,4 +3,8 @@
  (public_name tandem)
  (ocamlopt_flags
   (:standard -O3))
- )
+ (foreign_stubs
+  (language c)
+  (names tandem tandem_stubs)
+  (flags
+   (:standard -O2 -ffp-contract=off))))

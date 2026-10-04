@@ -42,11 +42,7 @@ let stream_words () =
 
 let draws_from_position_0 () =
   let at_bits p = Tandem.seek (rng ()) (Int64.of_int p) in
-  let single x = Int32.float_of_bits (Int32.bits_of_float x) in
   List.iter (fun (i, x) -> Alcotest.(check (float 0.)) "f64" x (fst (Tandem.float (at_bits (64 * i))))) f64;
-  List.iter
-    (fun (i, x) -> Alcotest.(check (float 0.)) "f32" (single x) (fst (Tandem.float32 (at_bits (32 * i)))))
-    f32;
   List.iter (fun (i, b) -> Alcotest.(check bool) "bool" b (fst (Tandem.bool (at_bits i)))) bool
 
 let derived_keys () =

@@ -19,7 +19,8 @@ let best f =
 
 let fill name ~bytes f =
   let t = best f in
-  Printf.printf "| %s | %.0f | %.2f |\n%!" name (float_of_int n /. t /. 1e6) (float_of_int (n * bytes) /. t /. 1e9)
+  Printf.printf "| %s | %.0f | %.2f |\n%!" name (float_of_int n /. t /. 1e6)
+    (float_of_int (n * bytes) /. t /. 1073741824.)
 
 let sink = ref 0
 
@@ -31,17 +32,18 @@ let () =
   let g = Tandem.seed 42 in
   let u32 = A1.create Bigarray.int32 Bigarray.c_layout n in
   let f64 = A1.create Bigarray.float64 Bigarray.c_layout n in
-  let f32 = A1.create Bigarray.float32 Bigarray.c_layout n in
   let fa = Float.Array.create n in
-  print_endline "| fill of 2^22 | Melem/s | GB/s |\n|---|---|---|";
+  print_endline "| fill of 2^22 | Melem/s | GiB/s |\n|---|---|---|";
   fill "u32" ~bytes:4 (fun () -> ignore (Tandem.fill_u32 g u32));
-  fill "float64" ~bytes:8 (fun () -> ignore (Tandem.fill_float g f64));
-  fill "float64, Float.Array" ~bytes:8 (fun () -> ignore (Tandem.Float_array.fill_float g fa));
-  fill "bounded 32 (range 1000)" ~bytes:4 (fun () -> ignore (Tandem.fill_below32 g ~range:1000 u32));
-  fill "normal float64" ~bytes:8 (fun () -> ignore (Tandem.fill_normal g f64));
-  fill "normal float32" ~bytes:4 (fun () -> ignore (Tandem.fill_normal32 g f32));
-  fill "exponential float64" ~bytes:8 (fun () -> ignore (Tandem.fill_exponential g f64));
-  fill "exponential float32" ~bytes:4 (fun () -> ignore (Tandem.fill_exponential32 g f32));
+  fill "float" ~bytes:8 (fun () -> ignore (Tandem.fill_float g f64));
+  fill "float, Float.Array" ~bytes:8 (fun () -> ignore (Tandem.Float_array.fill_float g fa));
+  fill "below32 1000" ~bytes:4 (fun () -> ignore (Tandem.fill_below32 g ~range:1000 u32));
+  fill "normal" ~bytes:8 (fun () -> ignore (Tandem.fill_normal g f64));
+  fill "exponential" ~bytes:8 (fun () -> ignore (Tandem.fill_exponential g f64));
+  fill "Pure u32" ~bytes:4 (fun () -> ignore (Tandem.Pure.fill_u32 g u32));
+  fill "Pure float" ~bytes:8 (fun () -> ignore (Tandem.Pure.fill_float g f64));
+  fill "Pure normal" ~bytes:8 (fun () -> ignore (Tandem.Pure.fill_normal g f64));
+  fill "Pure exponential" ~bytes:8 (fun () -> ignore (Tandem.Pure.fill_exponential g f64));
   print_endline "\n| scalar draw | ns |\n|---|---|";
   scalar "Tandem.u32" (fun () ->
       let g = ref g and s = ref 0 in
@@ -75,14 +77,33 @@ let () =
         s := !s +. x
       done;
       sink := int_of_float !s);
+  let st = Tandem.State.make [| 42 |] in
+  scalar "Tandem.State.bits" (fun () ->
+      let s = ref 0 in
+      for _ = 1 to scalar_draws do
+        s := !s + Tandem.State.bits st
+      done;
+      sink := !s);
   scalar "Tandem.State.bits64" (fun () ->
-      let st = Tandem.State.make_seed 42 and s = ref 0L in
+      let s = ref 0L in
       for _ = 1 to scalar_draws do
         s := Int64.add !s (Tandem.State.bits64 st)
       done;
       sink := Int64.to_int !s);
+  scalar "Tandem.State.float 1." (fun () ->
+      let s = ref 0. in
+      for _ = 1 to scalar_draws do
+        s := !s +. Tandem.State.float st 1.
+      done;
+      sink := int_of_float !s);
+  scalar "Tandem.State.int 1000" (fun () ->
+      let s = ref 0 in
+      for _ = 1 to scalar_draws do
+        s := !s + Tandem.State.int st 1000
+      done;
+      sink := !s);
   let st = Random.State.make [| 42 |] in
-  scalar "Random.State.bits (30 bits)" (fun () ->
+  scalar "Random.State.bits" (fun () ->
       let s = ref 0 in
       for _ = 1 to scalar_draws do
         s := !s + Random.State.bits st

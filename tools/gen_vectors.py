@@ -37,7 +37,6 @@ def main(path):
     out.append("]")
     d = v["draws_from_position_0"]
     out.append(f"let f64 = {pairs(d['Float64'], repr)}")
-    out.append(f"let f32 = {pairs(d['Float32'], repr)}")
     out.append(f"let bool = {pairs(d['Bool'], lambda x: str(bool(x)).lower())}")
     k = v["derived_keys"]
     out.append(f"let split0 = {words(k['split_child_0'])}")
