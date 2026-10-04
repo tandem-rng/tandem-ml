@@ -1,89 +1,60 @@
 # tandem-ml
 
 OCaml implementation of [Tandem8x32](https://github.com/tandem-rng/spec), a noncryptographic
-pseudorandom number generator built to be fast on CPUs and GPUs alike. The package is `tandem`.
-It produces the stream the specification defines, bit for bit.
+pseudorandom number generator. It produces the specified stream bit for bit and is fast on CPUs
+and GPUs alike. The package is `tandem`.
 
-- Pure OCaml 5.3 or newer, no C stubs, one dependency for the tests (`alcotest`).
-- A generator `Tandem.t` is a value: its transport form (128-bit key, 64-bit bit position,
-  chunk length `K`) plus a cache of the current 1024-bit row that its copies share. Every draw
-  returns the value and the successor generator.
-- Scalar draws: `bool`, `u32`, `u64`, `float` (53 bits), `float32` (24 bits, held in a float).
-- Bounded integers (`below32`, `below64`, `below`, `between`) and standard normals and
-  exponentials, scalar and as fills. They are not in the specification. They follow the shared
-  device core in `tandem-cuda`, so every port returns the same integers and values. A bound of 0
-  returns 0 after one draw.
-- `fill_below32` and `fill_below64` take one draw of the plain fill per element and consume
-  exactly one draw per element. A rejected draw retries on `split (purpose key P) g` of the key,
-  `g` being the global draw index, so a fill cut anywhere equals the whole.
-- A Box-Muller pair uses two uniform draws. `normal` returns its cos half and `normal2` the
-  `(cos, sin)` pair. `fill_normal` fills pairs from draws `2j` and `2j + 1`, so an odd length
-  uses the cos half of its last pair and consumes both draws.
-- Fills write into `Bigarray.Array1` (`int32`, `int64`, `float32`, `float64`, C layout) and, for
-  the float kinds, into `Float.Array` through `Tandem.Float_array`. Each takes `?off` and `?len`.
-- `split`, `fork` and `purpose` derive children. `position` and `seek` move a generator in
-  constant time.
-- `Tandem.State` wraps a mutable generator in the shape of `Random.State`.
+## Install
+
+```
+git clone git@github.com:tandem-rng/tandem-ml && cd tandem-ml
+opam install . --deps-only --with-test && dune build
+```
+
+Needs OCaml 5.3 or newer. No C stubs. Not published to opam.
 
 ## Use
 
 ```ocaml
-let () =
-  let g = Tandem.seed 42 in
-  let x, g = Tandem.float g in                      (* a draw and the next generator *)
-  let n, g = Tandem.below g 1000 in                 (* uniform in [0, 1000) *)
-  let z, g = Tandem.normal g in
-  let a = Bigarray.(Array1.create float64 c_layout 1_000_000) in
-  let g = Tandem.fill_normal g a in
-  let worker = Tandem.split g 7 in                  (* by index, from the key alone *)
-  let g, kids = Tandem.fork g 4 in                  (* from the current block *)
-  ignore (x, n, z, worker, g, kids)
+let g = Tandem.seed 42
+let x, g = Tandem.float g
+let n, g = Tandem.below g 1000
+let z, g = Tandem.normal g
+let a = Bigarray.(Array1.create float64 c_layout 1_000_000)
+let g = Tandem.fill_normal g a
 ```
-
-A fill at an offset reproduces part of a larger fill, so ranks and domains need no
-coordination:
 
 ```ocaml
-let part key ~first a =                             (* elements first.. of one global fill *)
-  Tandem.fill_float (Tandem.seek (Tandem.of_key key) (Int64.of_int (64 * first))) a
+let worker = Tandem.split g 7
+let g, kids = Tandem.fork g 4
 ```
 
-A generator and its copies share a cache of the current row. The cache changes no value, but do
-not use copies of one generator from two domains at once. Give each domain its own generator
-through `split`, `fork` or `purpose`.
+## What it provides
 
-## Single precision
+- `Tandem.t`: a value generator. `seed`, `seed_u128`, `of_key`, `position`, `seek`.
+- Scalar draws: `bool`, `u32`, `u64`, `float`, `float32`.
+- Bounded integers: `below32`, `below64`, `below`, `between`, `fill_below32`, `fill_below64`.
+- Normals: `normal`, `normal2`, `normal_f32`, `normal2_f32`, `fill_normal`, `fill_normal32`.
+- Exponentials: `exponential`, `exponential_f32`, `fill_exponential`, `fill_exponential32`.
+- Fills into `Bigarray.Array1` of `int32`, `int64`, `float32`, `float64`, with `?off` and `?len`.
+- Fills into `Float.Array`: `Tandem.Float_array`.
+- `split`, `fork`, `purpose` and their `_u64` forms.
+- `Tandem.State`: the shape of `Random.State` on a mutable generator.
+- Normals and exponentials equal tandem-c bit for bit, `float32` included.
 
-OCaml has no `float32`. The `_f32` functions hold single precision values in doubles and round
-to single after every operation, so every `float32` normal and exponential is bit for bit what
-tandem-c computes. A sum, product, quotient or root rounded once from a double is the single
-result. A fused multiply-add is rounded twice, to double and then to single, which differs from
-a single rounding only when the double result lands on a midpoint of two singles. No difference
-shows in the tests below.
-
-All multiply-adds of the normals and exponentials are `Float.fma`.
+More in [docs/notes.md](docs/notes.md).
 
 ## Tests
 
-`dune build @all @runtest` runs three suites with alcotest.
-
-- `vectors`: every vector of the specification.
-- `streams`: long dumps from the Julia implementation, as fills and as scalar draws.
-- `derived`: the bounded, normal and exponential fixtures of tandem-c, exact in every bit, fills
-  against scalar draws, fills cut at arbitrary elements, empty fills, `Float.Array` against
-  bigarray fills, and the 1e6-pair normal and exponential dumps against tandem-c's hashes.
-
-The fixtures are generated from tandem-c's headers at b049384:
-
 ```
-python3 tools/gen_derived.py ../tandem-c/tests > test/derived_data.ml
-python3 tools/gen_vectors.py ../tandem-spec/vectors.json > test/vectors_data.ml
-dune exec tools/dump.exe -- normals | shasum -a 256
+dune build @all @runtest
 ```
 
-The dump of the normals has the SHA-256 `cfae418807a7d5f91ecd3e42c33a00943690c6e4b888ee39206738783efe9ded`
-and the dump of the exponentials `5c035a4ef1368231d25a9c2f9201be2df3224e28a14549a50625d0db3770ef4e`,
-the same bytes as tandem-c's `tools/dump_normals.c` and `tools/dump_exponentials.c`.
+- Every spec vector, and long stream dumps from the Julia implementation.
+- The `cross_below`, `cross_fill_below`, `cross_normal` and `cross_exponential` fixtures of
+  tandem-c b049384, exact in every bit.
+- Fills against scalar draws, cut fills, empty fills.
+- The 1e6-pair normal and exponential hashes of tandem-c.
 
 ## Speed
 
@@ -112,10 +83,6 @@ Apple M4, one core, OCaml 5.5.1 with flambda, `dune exec --release bench/bench.e
 | `Random.State.bits64` | 3.5 |
 | `Random.State.float 1.` | 3.5 |
 | `Random.State.int 1000` | 3.6 |
-
-The standard library has no fills and no normals. `Random.State.float` at 3.5 ns per element is
-about 290 Melem/s, against 191 for `fill_float`. A scalar draw of `Tandem` allocates its
-successor generator. The fills are plain scalar OCaml, with no vector instructions.
 
 ## AI assistance
 
