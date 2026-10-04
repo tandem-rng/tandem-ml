@@ -1,3 +1,5 @@
+<p align="center"><img src="assets/lockup.png" width="560" alt="tandem rng .ml"></p>
+
 # tandem-ml
 
 [![CI](https://github.com/tandem-rng/tandem-ml/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/tandem-rng/tandem-ml/actions/workflows/ci.yml)
