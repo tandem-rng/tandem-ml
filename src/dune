@@ -1,0 +1,6 @@
+(library
+ (name tandem)
+ (public_name tandem)
+ (ocamlopt_flags
+  (:standard -O3))
+ )
