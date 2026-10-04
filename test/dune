@@ -1,0 +1,6 @@
+(tests
+ (names vectors streams derived)
+ (modules vectors streams derived vectors_data derived_data)
+ (libraries tandem alcotest)
+ (deps
+  (glob_files data/*.bin)))
