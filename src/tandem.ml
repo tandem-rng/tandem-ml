@@ -208,20 +208,68 @@ let between t ~lo ~hi =
 
 (* ---- Normals and exponentials, scalar ------------------------------------------------ *)
 
-let normal2 t =
-  let a, t = float t in
-  let b, t = float t in
-  let x, y = Box.pair a b in
-  (x, y, t)
+(* The ziggurat of Appendix A on the 64-bit draw with words [lo] and [hi]. The bits 0 to 9 of
+   [lo] pick the layer, bit 10 the sign through the signed width table, and the bits 11 to 63
+   are the magnitude [ra]. *)
+let purpose_normal64 = 0x4e_524d_3634L
+
+let[@inline] zig_magnitude lo hi = (hi lsl 21) lor (lo lsr 11)
+let[@inline] zig_x lo ra = float_of_int ra *. Array.unsafe_get Zig_tables.w (lo land 2047)
+let[@inline] zig_inside lo ra = ra < Array.unsafe_get Zig_tables.k (lo land 1023)
+
+(* A draw outside the inner rectangles continues on the fallback stream of its global draw
+   index [g], from the key of [ctx] alone. OCaml never fuses a product into a sum, so only
+   [neg2_log] fuses, as the spec requires. *)
+let[@inline never] zig_miss ctx g lo hi =
+  let f = ref (split_u64 (purpose_u64 { ctx; hi = 0; lo = 0 } purpose_normal64) (Int64.of_int g)) in
+  let next_float () =
+    let u, f' = float !f in
+    f := f';
+    u
+  in
+  let rec layer lo hi =
+    let i = lo land 1023 and ra = zig_magnitude lo hi in
+    let x = zig_x lo ra in
+    if zig_inside lo ra then x
+    else if i = 0 then begin
+      let rec tail () =
+        let a = Logarithm.exponential (next_float ()) /. Zig_tables.r in
+        let b = Logarithm.exponential (next_float ()) in
+        if b +. b >= a *. a then a else tail ()
+      in
+      let x = Zig_tables.r +. tail () in
+      if (lo lsr 10) land 1 = 1 then -.x else x
+    end
+    else
+      let y0 = Array.unsafe_get Zig_tables.y i in
+      let u = next_float () in
+      let y = y0 +. (u *. (Array.unsafe_get Zig_tables.y (i + 1) -. y0)) in
+      if -0.5 *. Logarithm.neg2_log y < -0.5 *. (x *. x) then x
+      else
+        let r, f' = u64 !f in
+        f := f';
+        layer (Int64.to_int r land mask) (Int64.to_int (Int64.shift_right_logical r 32))
+  in
+  layer lo hi
+
+let[@inline] zig ctx g lo hi =
+  let ra = zig_magnitude lo hi in
+  if zig_inside lo ra then zig_x lo ra else zig_miss ctx g lo hi
+
+(* The normal at the aligned low limb [alo]. *)
+let[@inline] read_normal ctx hi alo =
+  let w = word_at hi alo in
+  Engine.load ctx (w lsr 5);
+  let i = w land 31 in
+  zig ctx (w lsr 1) (Engine.word ctx i) (Engine.word ctx (i + 1))
 
 let normal t =
-  let a, t = float t in
-  let b, t = float t in
-  (fst (Box.pair a b), t)
+  let alo = align t.lo 64 in
+  (read_normal t.ctx t.hi alo, advance t alo 64)
 
 let exponential t =
   let u, t = float t in
-  (Box.exponential u, t)
+  (Logarithm.exponential u, t)
 
 (* ---- Fills --------------------------------------------------------------------------- *)
 
@@ -259,9 +307,6 @@ let fill_with t ~w ~n f =
   let t' = advance t alo (n * w) in
   if n > 0 then f (word_at t.hi alo);
   t'
-
-(* A normal fill of [n] elements consumes [2 * ceil (n / 2)] uniforms. *)
-let normal_draws n = 2 * ((n + 1) / 2)
 
 module Pure = struct
   (* Rows of a fill of [n] elements of [32 lsl sh] bits from the 32-bit word [word0], which is
@@ -317,35 +362,26 @@ module Pure = struct
                 (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
             done))
 
-  (* Derived fills draw the uniforms in blocks that stay in cache and map them in place. An
+  (* Element [i] of a normal fill is the ziggurat on draw [i] of the u64 fill. *)
+  let[@inline] normals t n set =
+    fill_with t ~w:64 ~n (fun word0 ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+            let g = (word0 lsr 1) + dst in
+            for k = 0 to cnt - 1 do
+              let e = (first + k) lsl 1 in
+              set (dst + k) (zig t.ctx (g + k) (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
+            done))
+
+  (* Exponential fills draw the uniforms in blocks that stay in cache and map them in place. An
      empty one moves nothing. *)
   let block = 1024
-
-  let normals t a off n =
-    if n = 0 then t
-    else begin
-      let t = ref t and at = ref 0 in
-      let even = n land lnot 1 in
-      while !at < even do
-        let b = min block (even - !at) in
-        t := uniforms !t a (off + !at) b;
-        Box.normal_block a (off + !at) (b / 2);
-        at := !at + b
-      done;
-      if n land 1 = 1 then begin
-        let x, t' = normal !t in
-        t := t';
-        Float.Array.set a (off + n - 1) x
-      end;
-      !t
-    end
 
   let exponentials t a off n =
     let t = ref t and at = ref 0 in
     while !at < n do
       let b = min block (n - !at) in
       t := uniforms !t a (off + !at) b;
-      Box.exponential_block a (off + !at) b;
+      Logarithm.exponential_block a (off + !at) b;
       at := !at + b
     done;
     !t
@@ -357,7 +393,7 @@ module Pure = struct
 
     let fill_normal ?off ?len t a =
       let off, n = range_of "fill_normal" (Float.Array.length a) off len in
-      normals t a off n
+      normals t n (fun i x -> Float.Array.unsafe_set a (off + i) x)
 
     let fill_exponential ?off ?len t a =
       let off, n = range_of "fill_exponential" (Float.Array.length a) off len in
@@ -380,7 +416,7 @@ module Pure = struct
 
   let fill_normal ?off ?len t (a : f64_array) =
     let off, n = range_of "fill_normal" (A1.dim a) off len in
-    if n = 0 then t else via_floats normals t a off n
+    normals t n (fun i x -> A1.unsafe_set a (off + i) x)
 
   let fill_exponential ?off ?len t (a : f64_array) =
     let off, n = range_of "fill_exponential" (A1.dim a) off len in
@@ -476,7 +512,7 @@ let fill_float ?off ?len t (a : f64_array) =
 
 let fill_normal ?off ?len t (a : f64_array) =
   let off, n = range_of "fill_normal" (A1.dim a) off len in
-  if n = 0 then t else fill_with t ~w:64 ~n:(normal_draws n) (fun word0 -> c_fill_normal t.ctx word0 a off n)
+  fill_with t ~w:64 ~n (fun word0 -> c_fill_normal t.ctx word0 a off n)
 
 let fill_exponential ?off ?len t (a : f64_array) =
   let off, n = range_of "fill_exponential" (A1.dim a) off len in
@@ -501,7 +537,7 @@ module Float_array = struct
 
   let fill_normal ?off ?len t a =
     let off, n = range_of "fill_normal" (Float.Array.length a) off len in
-    if n = 0 then t else fill_with t ~w:64 ~n:(normal_draws n) (fun word0 -> c_fill_normal_fa t.ctx word0 a off n)
+    fill_with t ~w:64 ~n (fun word0 -> c_fill_normal_fa t.ctx word0 a off n)
 
   let fill_exponential ?off ?len t a =
     let off, n = range_of "fill_exponential" (Float.Array.length a) off len in
@@ -594,11 +630,12 @@ module State = struct
   let[@inline] float s scale = scale *. next_float s
 
   let normal s =
-    let a = next_float s in
-    let b = next_float s in
-    fst (Box.pair a b)
+    let alo = align s.lo 64 in
+    let x = read_normal s.ctx s.hi alo in
+    move s alo 64;
+    x
 
-  let exponential s = Box.exponential (next_float s)
+  let exponential s = Logarithm.exponential (next_float s)
 
   (* [below32] for a bound below 2^30, whose products fit in an int. *)
   let int s bound =

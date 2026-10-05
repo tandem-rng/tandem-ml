@@ -1,7 +1,6 @@
-(* Bounded integers, normals and exponentials agree bit for bit with tandem-c, which takes its
-   fixtures from the shared device core. Fills agree with scalar draws, are cuttable at any
-   element, and the C fills equal the pure OCaml fills. The fixed values come from
-   derived_data.ml. *)
+(* Bounded integers, normals and exponentials agree bit for bit with tandem-c. Fills agree with
+   scalar draws, are cuttable at any element, and the C fills equal the pure OCaml fills. The
+   fixed values come from derived_data.ml. *)
 
 module A1 = Bigarray.Array1
 open Derived_data
@@ -9,8 +8,7 @@ open Derived_data
 let bits = Int64.bits_of_float
 let same_float msg want got = Alcotest.(check int64) msg (bits want) (bits got)
 
-(* The bounded and normal fixtures start after one bit draw, which leaves the position
-   unaligned. *)
+(* The bounded fixtures start after one bit draw, which leaves the position unaligned. *)
 let start () = snd (Tandem.bool (Tandem.seed 42))
 let at p = Tandem.seek (Tandem.seed 42) (Int64.of_int p)
 let pos = Alcotest.int64
@@ -78,65 +76,84 @@ let width_from_range () =
 
 (* ---- Normals and exponentials ---- *)
 
-let normal_fixture () =
-  let want, end_pos = normal64 in
-  let n = Array.length want in
-  let g = ref (start ()) in
-  let got = Array.make n 0. in
-  for j = 0 to (n / 2) - 1 do
-    let c, s, g' = Tandem.normal2 !g in
-    g := g';
-    got.(2 * j) <- c;
-    got.((2 * j) + 1) <- s
-  done;
-  Array.iteri (fun i w -> same_float (Printf.sprintf "normal2 %d" i) w got.(i)) want;
-  Alcotest.check pos "end" (Int64.of_int end_pos) (Tandem.position !g);
-  let a = f64_array n and fa = Float.Array.create n in
-  let g1 = Tandem.fill_normal (start ()) a and g2 = Tandem.Float_array.fill_normal (start ()) fa in
-  Array.iteri (fun i w -> same_float (Printf.sprintf "fill %d" i) w a.{i}) want;
-  Array.iteri (fun i w -> same_float (Printf.sprintf "float array fill %d" i) w (Float.Array.get fa i)) want;
-  Alcotest.check pos "fill end" (Int64.of_int end_pos) (Tandem.position g1);
-  Alcotest.check pos "float array fill end" (Int64.of_int end_pos) (Tandem.position g2);
-  let c, _ = Tandem.normal (start ()) in
-  same_float "normal is element 0" want.(0) c
-
-let exponential_fixture () =
+(* Each fixture row through the C and pure fills into both array kinds, the scalar draws and the
+   stateful draws. Element 20 of the last rows misses the inner rectangles. *)
+let start_fixture fixture ~fills ~draws ~state () =
   List.iter
     (fun (from, want, end_pos) ->
       let n = Array.length want in
-      let a = f64_array n and fa = Float.Array.create n in
-      let g1 = Tandem.fill_exponential (at from) a in
-      let g2 = Tandem.Float_array.fill_exponential (at from) fa in
+      let check name got g =
+        Array.iteri (fun i w -> same_float (Printf.sprintf "%s %d at %d" name i from) w (got i)) want;
+        Alcotest.check pos (name ^ " end") (Int64.of_int end_pos) (Tandem.position g)
+      in
+      List.iter
+        (fun (name, fill, fill_fa) ->
+          let a = f64_array n and fa = Float.Array.create n in
+          check name (A1.get a) (fill (at from) a);
+          check (name ^ " Float.Array") (Float.Array.get fa) (fill_fa (at from) fa))
+        fills;
       let g = ref (at from) in
-      Array.iteri
-        (fun i w ->
-          same_float (Printf.sprintf "fill %d at %d" i from) w a.{i};
-          same_float (Printf.sprintf "float array fill %d at %d" i from) w (Float.Array.get fa i);
-          let e, g' = Tandem.exponential !g in
-          g := g';
-          same_float (Printf.sprintf "draw %d at %d" i from) w e)
-        want;
-      List.iter (fun g -> Alcotest.check pos "end" (Int64.of_int end_pos) (Tandem.position g)) [ g1; g2; !g ])
-    exponential64
+      let got = Array.map (fun _ -> let x, g' = draws !g in g := g'; x) want in
+      check "draw" (Array.get got) !g;
+      let s = Tandem.State.of_generator (at from) in
+      let got = Array.map (fun _ -> state s) want in
+      check "State" (Array.get got) (Tandem.State.generator s))
+    fixture
 
-(* FNV-1a of the f64 fills of tandem-c's tools/dump_normals.c and tools/dump_exponentials.c,
-   without their f32 parts, from the same build of tandem-c b049384 whose full dumps hash to
-   0x9414e1315e2653be and 0x47f8f98297d94ee2. *)
+let normal_fixture =
+  start_fixture normal64 ~draws:Tandem.normal ~state:Tandem.State.normal
+    ~fills:
+      [
+        ("fill", (fun g a -> Tandem.fill_normal g a), fun g a -> Tandem.Float_array.fill_normal g a);
+        ("pure fill", (fun g a -> Tandem.Pure.fill_normal g a), fun g a -> Tandem.Pure.Float_array.fill_normal g a);
+      ]
+
+let exponential_fixture =
+  start_fixture exponential64 ~draws:Tandem.exponential ~state:Tandem.State.exponential
+    ~fills:
+      [
+        ("fill", (fun g a -> Tandem.fill_exponential g a), fun g a -> Tandem.Float_array.fill_exponential g a);
+        ( "pure fill",
+          (fun g a -> Tandem.Pure.fill_exponential g a),
+          fun g a -> Tandem.Pure.Float_array.fill_exponential g a );
+      ]
+
+let fnv h (d : Tandem.f64_array) =
+  let h = ref h in
+  for i = 0 to A1.dim d - 1 do
+    let x = bits d.{i} in
+    for b = 0 to 7 do
+      let byte = Int64.logand (Int64.shift_right_logical x (8 * b)) 0xffL in
+      h := Int64.mul (Int64.logxor !h byte) 0x100000001b3L
+    done
+  done;
+  !h
+
+let fnv0 = 0xcbf29ce484222325L
+
+(* FNV-1a of the bytes of tandem-c's tools/dump_normals.c, and of the f64 part of
+   tools/dump_exponentials.c, from tandem-c b049384 whose full exponential dump hashes to
+   0x47f8f98297d94ee2. *)
 let long_fill_hash ~count fill expected () =
   let d = f64_array count in
-  let h = ref 0xcbf29ce484222325L in
+  let h = ref fnv0 in
   List.iter
     (fun from ->
       ignore (fill (Tandem.seek (Tandem.seed_u128 2026L 7L) (Int64.of_int from)) d);
-      for i = 0 to count - 1 do
-        let x = bits d.{i} in
-        for b = 0 to 7 do
-          let byte = Int64.logand (Int64.shift_right_logical x (8 * b)) 0xffL in
-          h := Int64.mul (Int64.logxor !h byte) 0x100000001b3L
-        done
-      done)
+      h := fnv !h d)
     [ 0; 1; 77; 12345; 1 lsl 30 ];
   Alcotest.(check int64) "FNV-1a" expected !h
+
+(* The hashes and end positions that tandem-c's tests/test_normal_bits.c checks against a Python
+   implementation written from the text of Appendix A. *)
+let python_reference fill () =
+  let d = f64_array 200_000 in
+  List.iter
+    (fun (from, hash, end_pos) ->
+      let g = fill (Tandem.of_key ~position:(Int64.of_int from) [| 1; 2; 3; 4 |]) d in
+      Alcotest.(check int64) (Printf.sprintf "FNV-1a at %d" from) hash (fnv fnv0 d);
+      Alcotest.check pos "end" (Int64.of_int end_pos) (Tandem.position g))
+    [ (0, 0x0c4059ed409d578dL, 12800000); (2373, 0x30ce40c86b295193L, 12802432) ]
 
 (* Moments to the fourth order within five standard errors, and the Kolmogorov-Smirnov
    distance below its 0.1 % critical value 1.95 / sqrt n. *)
@@ -206,35 +223,45 @@ let cut_fills () =
   cut_fill "below64" ~create:u64_array
     ~fill:(fun ?off ?len g a -> Tandem.fill_below64 ?off ?len g ~range:(-4611686018427387903L) a)
     ~get:A1.get ~equal:Int64.equal cases;
-  (* Normals pair up draws, so a cut falls on an even element. *)
-  cut_fill "normal" ~create:f64_array
-    ~fill:(fun ?off ?len g a -> Tandem.fill_normal ?off ?len g a)
-    ~get:A1.get ~equal:eq_f
-    [ (0, 701, 2); (5, 3001, 1024); (1001, 2500, 2046) ]
+  (* Element 20 from 4673, 17345 and 2914241 misses the inner rectangles: a wedge accept, a
+     wedge reject and the tail. A cut lands on it, just before it and just after it, and the
+     C fills cut in blocks of 512 draws. *)
+  let normal_cases =
+    [ (0, 701, 1); (5, 3001, 1023); (1001, 2500, 2047); (4673, 64, 20); (17345, 64, 21); (2914241, 64, 19);
+      (2914241, 1500, 20) ]
+  in
+  cut_fill "normal" ~create:f64_array ~fill:(fun ?off ?len g a -> Tandem.fill_normal ?off ?len g a)
+    ~get:A1.get ~equal:eq_f normal_cases;
+  cut_fill "pure normal" ~create:f64_array
+    ~fill:(fun ?off ?len g a -> Tandem.Pure.fill_normal ?off ?len g a)
+    ~get:A1.get ~equal:eq_f normal_cases
 
-(* A normal or exponential fill is the flattened scalar sequence, across the block size of the
-   fill, with an odd length that keeps the cosine half of the last pair. *)
+(* A normal or exponential fill is the scalar sequence, across the block sizes of the fills and
+   across about nine misses of the ziggurat. *)
 let fills_are_draws () =
   let n = 2051 in
-  let a = f64_array n in
-  let g = Tandem.fill_normal (at 9) a in
-  let s = ref (at 9) in
-  for j = 0 to n / 2 do
-    let c, z, s' = Tandem.normal2 !s in
-    s := s';
-    same_float "cos" c a.{2 * j};
-    if 2 * j + 1 < n then same_float "sin" z a.{(2 * j) + 1}
-  done;
-  Alcotest.(check bool) "both uniforms of the last pair are consumed" true (Tandem.equal g !s);
-  let e = f64_array n in
-  let g = Tandem.fill_exponential (at 9) e in
-  let s = ref (at 9) in
-  for i = 0 to n - 1 do
-    let x, s' = Tandem.exponential !s in
-    s := s';
-    same_float "exponential" x e.{i}
-  done;
-  Alcotest.(check bool) "end" true (Tandem.equal g !s)
+  List.iter
+    (fun (name, fill, draw) ->
+      List.iter
+        (fun (fname, fill) ->
+          let a = f64_array n in
+          let g = fill (at 9) a in
+          let s = ref (at 9) in
+          for i = 0 to n - 1 do
+            let x, s' = draw !s in
+            s := s';
+            same_float (Printf.sprintf "%s %s %d" name fname i) x a.{i}
+          done;
+          Alcotest.(check bool) (name ^ " end") true (Tandem.equal g !s))
+        fill)
+    [
+      ( "normal",
+        [ ("fill", fun g a -> Tandem.fill_normal g a); ("pure", fun g a -> Tandem.Pure.fill_normal g a) ],
+        Tandem.normal );
+      ( "exponential",
+        [ ("fill", fun g a -> Tandem.fill_exponential g a); ("pure", fun g a -> Tandem.Pure.fill_exponential g a) ],
+        Tandem.exponential );
+    ]
 
 (* A fill of one kind from a position is the scalar draws of that kind. *)
 let uniform_fills_are_draws () =
@@ -324,12 +351,19 @@ let empty_fills () =
       let moved g' = not (Tandem.equal g g') in
       Alcotest.(check bool) "bounded 32" false (moved (Tandem.fill_below32 g ~range:10 (u32_array 0)));
       Alcotest.(check bool) "bounded 64" false (moved (Tandem.fill_below64 g ~range:10L (u64_array 0)));
-      Alcotest.(check bool) "normal" false (moved (Tandem.fill_normal g (f64_array 0)));
       Alcotest.(check bool) "exponential" false (moved (Tandem.fill_exponential g (f64_array 0)));
-      Alcotest.(check bool) "float array normal" false (moved (Tandem.Float_array.fill_normal g (Float.Array.create 0)));
-      (* A plain fill aligns the position, as the specification says. *)
-      Alcotest.check pos "u32 aligns" (Int64.of_int ((from + 31) land lnot 31)) (Tandem.position (Tandem.fill_u32 g (u32_array 0)));
-      Alcotest.check pos "f64 aligns" (Int64.of_int ((from + 63) land lnot 63)) (Tandem.position (Tandem.fill_float g (f64_array 0))))
+      (* A plain or normal fill aligns the position, as section 5 says. *)
+      let a32 = Int64.of_int ((from + 31) land lnot 31) and a64 = Int64.of_int ((from + 63) land lnot 63) in
+      Alcotest.check pos "u32 aligns" a32 (Tandem.position (Tandem.fill_u32 g (u32_array 0)));
+      Alcotest.check pos "f64 aligns" a64 (Tandem.position (Tandem.fill_float g (f64_array 0)));
+      List.iter
+        (fun (name, g') -> Alcotest.check pos (name ^ " aligns") a64 (Tandem.position g'))
+        [
+          ("normal", Tandem.fill_normal g (f64_array 0));
+          ("Float.Array normal", Tandem.Float_array.fill_normal g (Float.Array.create 0));
+          ("pure normal", Tandem.Pure.fill_normal g (f64_array 0));
+          ("pure Float.Array normal", Tandem.Pure.Float_array.fill_normal g (Float.Array.create 0));
+        ])
     [ 0; 1; 5; 33; 65; 1001 ]
 
 let seek_bounds () =
@@ -384,9 +418,13 @@ let () =
           Alcotest.test_case "normals match tandem-c" `Quick normal_fixture;
           Alcotest.test_case "exponentials match tandem-c" `Quick exponential_fixture;
           Alcotest.test_case "normal bits equal tandem-c" `Slow
-            (long_fill_hash ~count:1999999 (fun g a -> Tandem.fill_normal g a) 0x8ea806b43afe58edL);
+            (long_fill_hash ~count:1_000_000 (fun g a -> Tandem.fill_normal g a) 0xa61cfa844c85f7c1L);
           Alcotest.test_case "pure normal bits equal tandem-c" `Slow
-            (long_fill_hash ~count:1999999 (fun g a -> Tandem.Pure.fill_normal g a) 0x8ea806b43afe58edL);
+            (long_fill_hash ~count:1_000_000 (fun g a -> Tandem.Pure.fill_normal g a) 0xa61cfa844c85f7c1L);
+          Alcotest.test_case "normals equal the Python reference" `Quick
+            (python_reference (fun g a -> Tandem.fill_normal g a));
+          Alcotest.test_case "pure normals equal the Python reference" `Quick
+            (python_reference (fun g a -> Tandem.Pure.fill_normal g a));
           Alcotest.test_case "exponential bits equal tandem-c" `Slow
             (long_fill_hash ~count:1000000 (fun g a -> Tandem.fill_exponential g a) 0x8cb6728a73181814L);
           Alcotest.test_case "pure exponential bits equal tandem-c" `Slow
@@ -394,6 +432,9 @@ let () =
           Alcotest.test_case "normals are N(0, 1)" `Slow
             (distribution "normal" ~fill:(fun g a -> Tandem.Float_array.fill_normal g a) ~cdf:normal_cdf
                ~moments:normal_moments);
+          Alcotest.test_case "pure normals are N(0, 1)" `Slow
+            (distribution "pure normal" ~fill:(fun g a -> Tandem.Pure.Float_array.fill_normal g a)
+               ~cdf:normal_cdf ~moments:normal_moments);
           Alcotest.test_case "exponentials are Exp(1)" `Slow
             (distribution "exponential" ~fill:(fun g a -> Tandem.Float_array.fill_exponential g a)
                ~cdf:exponential_cdf ~moments:exponential_moments);

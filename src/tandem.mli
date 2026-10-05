@@ -12,7 +12,7 @@
     domain its own generator through {!split}, {!fork} or {!purpose}.
 
     The bounded draws, normals and exponentials of Appendix A are not part of the specification.
-    They follow the shared device core, so that every port returns the same values.
+    They follow its conventions, so that every port returns the same values.
 
     OCaml has no single precision float, so the library has no [Float32] draws. *)
 
@@ -68,7 +68,8 @@ val split_u64 : t -> int64 -> t
 
 val purpose : t -> int -> t
 (** [purpose t u] is the child for the named purpose [u], by key alone, at position 0. The values
-    [0x424c573332] and [0x424c573634] are reserved for bounded fills. *)
+    [0x424c573332] and [0x424c573634] are reserved for bounded fills, [0x4e524d3634] for
+    normals. *)
 
 val purpose_u64 : t -> int64 -> t
 
@@ -108,14 +109,16 @@ val between : t -> lo:int -> hi:int -> int * t
 
 (** {2 Normals and exponentials}
 
-    Normals follow the Box-Muller transform on two uniforms, exponentials [-ln (1 - u)] on one.
-    The values equal tandem-c bit for bit. *)
+    Normals follow the 1024-layer ziggurat on one 64-bit draw, exponentials [-ln (1 - u)] on one
+    uniform. The values equal tandem-c bit for bit.
+
+    A draw outside the inner rectangles of the ziggurat, 0.43 % of them, continues on the
+    fallback stream [split (purpose t0 0x4e524d3634) g], where [t0] has the key of the generator
+    and [g] is the global index of the draw: the aligned position over 64. The fallback draws
+    never move the generator. *)
 
 val normal : t -> float * t
-(** The cosine half of a pair, from two 64-bit draws. It equals element 0 of {!fill_normal}. *)
-
-val normal2 : t -> float * float * t
-(** Both halves of a pair, cosine first. *)
+(** From one 64-bit draw. It equals element 0 of {!fill_normal}. *)
 
 val exponential : t -> float * t
 
@@ -125,9 +128,9 @@ val exponential : t -> float * t
     after it. A fill equals the same number of scalar draws, so a fill cut at any element
     equals the whole fill.
 
-    A plain fill of 0 elements returns the position aligned to the element width. The bounded,
-    normal and exponential fills of 0 elements move nothing. A normal fill consumes
-    [2 * ceil (len / 2)] uniforms, and an odd length keeps the cosine half of its last pair.
+    A plain or normal fill of 0 elements returns the position aligned to the element width. The
+    bounded and exponential fills of 0 elements move nothing. A normal fill consumes [len]
+    64-bit draws, element [i] from draw [i].
 
     @raise Invalid_argument if the range lies outside the array or the fill would pass bit 2^64. *)
 
