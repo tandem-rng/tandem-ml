@@ -17,7 +17,7 @@ opam install . --deps-only --with-test && dune build
 ```
 
 Needs OCaml 5.3 or newer and a C compiler. The fills run a vendored copy of tandem-c at
-`b049384`. Not published to opam.
+`121db59`. Not published to opam.
 
 ## AI assistance
 

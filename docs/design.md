@@ -2,8 +2,9 @@
 
 ## Fills
 
-The fills run the vendored `src/tandem.c` and `src/tandem.h`, a copy of tandem-c at `b049384`,
-built by dune with `-O2 -ffp-contract=off` and OCaml's C compiler (clang on macOS). The stubs
+The fills run the vendored `src/tandem.c`, `src/tandem.h` and `src/tandem_normal_tables.h`, a
+copy of tandem-c at `121db59`, built by dune with `-O2 -ffp-contract=off` and OCaml's C
+compiler (clang on macOS). The stubs
 in `src/tandem_stubs.c` read and write the generator's row cache, so a fill after a scalar draw,
 or a scalar draw after a fill, does not reseed. OCaml checks every range and position before
 the call, and the stubs neither allocate nor raise. A fill holds its domain until it returns.
@@ -15,7 +16,7 @@ same row, an earlier row or another group.
 To update the vendored copy:
 
 ```
-cp ../tandem-c/tandem.c ../tandem-c/tandem.h src/
+cp ../tandem-c/tandem.c ../tandem-c/tandem.h ../tandem-c/tandem_normal_tables.h src/
 ```
 
 ## Bounded integers
@@ -26,7 +27,16 @@ exactly one draw per element. A rejected draw retries on `split (purpose key P) 
 
 ## Normals and exponentials
 
-A Box-Muller pair uses two uniform draws. `normal` returns its cos half and `normal2` the
-`(cos, sin)` pair. `fill_normal` fills pairs from draws `2j` and `2j + 1`, so an odd length
-uses the cos half of its last pair and consumes both draws. Normals and exponentials equal
-tandem-c bit for bit.
+Normals follow the 1024-layer ziggurat of Appendix A. Element `i` of `fill_normal` comes from
+draw `i` of the u64 fill, and `normal` takes one 64-bit draw. A draw outside the inner
+rectangles, 0.43 % of them, continues on `split (purpose key 0x4e524d3634) g`, `g` being the
+global draw index, so a fill cut anywhere equals the whole and the fallback never moves the
+generator. `Tandem.Pure` and the scalar draws take the tables from `src/zig_tables.ml`, which
+`tools/gen_zig_tables.py` writes from the spec's `tables/normal_f64_zig1024.json`:
+
+```
+python3 tools/gen_zig_tables.py ../tandem-spec/tables/normal_f64_zig1024.json > src/zig_tables.ml
+```
+
+The logarithm is the reference one of Appendix A with `Float.fma`, and OCaml fuses no other
+operation. Normals and exponentials equal tandem-c bit for bit.

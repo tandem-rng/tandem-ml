@@ -18,7 +18,7 @@ let g, kids = Tandem.fork g 4
 - `Tandem.t`: a value generator. `seed`, `seed_u128`, `of_key`, `position`, `seek`.
 - Scalar draws: `bool`, `u32`, `u64`, `float`.
 - Bounded integers: `below32`, `below64`, `below`, `between`, `fill_below32`, `fill_below64`.
-- Normals: `normal`, `normal2`, `fill_normal`.
+- Normals: `normal`, `fill_normal`.
 - Exponentials: `exponential`, `fill_exponential`.
 - Fills into `Bigarray.Array1` of `int32`, `int64`, `float64`, with `?off` and `?len`.
 - Fills into `Float.Array`: `Tandem.Float_array`.
@@ -29,7 +29,7 @@ let g, kids = Tandem.fork g 4
   `K`) plus a cache of the current 1024-bit row that its copies share. Every draw returns the
   value and the successor generator.
 - A bound of 0 returns 0 after one draw.
-- A plain fill of 0 elements aligns the position. Bounded, normal and exponential fills of 0
+- A plain or normal fill of 0 elements aligns the position. Bounded and exponential fills of 0
   elements move nothing.
 - `Tandem.State` has the shape of `Random.State`. `State.make` takes any int array: the first
   integer is the seed and each further integer `i` takes `split i`.

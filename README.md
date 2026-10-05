@@ -11,7 +11,7 @@ pseudorandom number generator. It produces the specified stream bit for bit. Fil
 tandem-c through C stubs, with a pure OCaml fallback in `Tandem.Pure`.
 
 Install with opam and dune. It needs OCaml 5.3 or newer and a C compiler. The vendored tandem-c
-is at `b049384`. The package `tandem` is not published to opam.
+is at `121db59`. The package `tandem` is not published to opam.
 
 ```
 git clone git@github.com:tandem-rng/tandem-ml && cd tandem-ml
@@ -22,7 +22,7 @@ dune build @all @runtest
 ```ocaml
 let g = Tandem.seed 42
 let a = Bigarray.(Array1.create float64 c_layout 1_000_000)
-let g = Tandem.fill_normal g a                   (* Box-Muller, bit identical to tandem-c *)
+let g = Tandem.fill_normal g a                   (* ziggurat, bit identical to tandem-c *)
 let worker = Tandem.split g 7                    (* by index, from the key alone *)
 let n, worker = Tandem.below worker 1000         (* uniform on [0, 1000), Lemire's method *)
 ```
