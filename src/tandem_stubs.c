@@ -77,13 +77,21 @@ value tandem_ml_refill(value ctx, intnat word) {
 
 value tandem_ml_refill_byte(value ctx, value word) { return tandem_ml_refill(ctx, Long_val(word)); }
 
-/* The normal at 32-bit word `word`. The scalar draws call it only when the ziggurat leaves
- * its inner rectangles. */
+/* The normal at 32-bit word `word`, which lies in ctx.buf. The scalar draws call it only when
+ * the ziggurat leaves its inner rectangles. The draw reads its row and steps nothing, so a
+ * cache that holds that row's exposed words from ctx.buf, and no hidden words, suffices. The
+ * cache is not written back. */
 double tandem_ml_normal(value ctx, intnat word) {
-    tandem_rng r = from_ctx(ctx, word);
-    double x = tandem_normal_f64(&r);
-    to_ctx(&r, ctx);
-    return x;
+    value key = Field(ctx, 0);
+    const uint32_t *row =
+        (const uint32_t *)Bytes_val(Field(ctx, 4)) + ((word - Long_val(Field(ctx, 5))) & ~(intnat)31);
+    uint32_t k[4];
+    for (int i = 0; i < 4; i++) k[i] = (uint32_t)Long_val(Field(key, i));
+    tandem_rng r = tandem_from_key(k, (uint64_t)word << 5, 1u << Long_val(Field(ctx, 1)));
+    for (int i = 0; i < 32; i++) r.o[i & 3][i >> 2] = row[i];
+    r.row = (uint64_t)word >> 5;
+    r.cached = 1u;
+    return tandem_normal_f64(&r);
 }
 
 value tandem_ml_normal_byte(value ctx, value word) {

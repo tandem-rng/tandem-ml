@@ -682,7 +682,7 @@ module State = struct
 
   let[@inline] float s scale = scale *. next_float s
 
-  let normal s = next64 fast_normal s
+  let[@inline] normal s = next64 fast_normal s
   let exponential s = Logarithm.exponential (next_float s)
 
   (* [below32] for a bound below 2^30, whose products fit in an int. *)
