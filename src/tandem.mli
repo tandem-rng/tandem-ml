@@ -165,7 +165,7 @@ include Fills
 (** The fills run tandem.c, vendored and compiled with the library. *)
 
 module Pure : Fills
-(** The fills in OCaml alone, ten to fifteen times slower. They are the reference that the C
+(** The fills in OCaml alone, eight to ten times slower. They are the reference that the C
     fills must equal bit for bit. *)
 
 (** {1 Stateful wrapper}
