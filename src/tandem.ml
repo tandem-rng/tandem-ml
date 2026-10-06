@@ -232,6 +232,111 @@ let between t ~lo ~hi =
     let x, t = below64 t range in
     (lo + Int64.to_int x, t)
 
+(* ---- Weighted choice ----------------------------------------------------------------- *)
+
+(* Appendix C of the specification: an alias table in exact integers, so that every port builds
+   the same table and returns the same indices. *)
+module Choice = struct
+  type t = { m : int; capacity : int64; cut : u64_array; alias : u32_array }
+
+  let bit_length x =
+    let n = ref 0 and x = ref x in
+    while not (Int64.equal !x 0L) do
+      incr n;
+      x := Int64.shift_right_logical !x 1
+    done;
+    !n
+
+  (* A finite non-negative weight [w = s 2^e], with the integer significand [s]. *)
+  let decompose w =
+    let bits = Int64.bits_of_float w in
+    let biased = Int64.to_int (Int64.shift_right_logical bits 52) land 0x7ff in
+    let frac = Int64.logand bits 0xf_ffff_ffff_ffffL in
+    if biased = 0 then (frac, -1074) else (Int64.logor frac 0x10_0000_0000_0000L, biased - 1075)
+
+  (* [ceil (s 2^(e + t))] for [s] below [2^53], exact. The caller keeps it below [2^64]. *)
+  let ceil_scaled (s, e) t =
+    let k = e + t in
+    if Int64.equal s 0L then 0L
+    else if k >= 0 then Int64.shift_left s k
+    else if k <= -54 then 1L
+    else
+      let low = Int64.logand s (Int64.pred (Int64.shift_left 1L (-k))) in
+      Int64.add (Int64.shift_right_logical s (-k)) (if Int64.equal low 0L then 0L else 1L)
+
+  let create weights =
+    let m = Array.length weights in
+    if m = 0 || m >= 1 lsl 32 then invalid_arg "Tandem.Choice.create: 1 to 2^32 - 1 weights";
+    Array.iter
+      (fun w ->
+        if not (Float.is_finite w && w >= 0.) then
+          invalid_arg "Tandem.Choice.create: a weight is negative or not finite")
+      weights;
+    let wmax = Array.fold_left Float.max 0. weights in
+    if wmax = 0. then invalid_arg "Tandem.Choice.create: every weight is zero";
+    let parts = Array.map decompose weights in
+    let m64 = Int64.of_int m in
+    (* 2^e <= wmax < 2^(e + 1), then a first pass that cannot overflow and a second that scales
+       the total to just below 2^63. *)
+    let ms, me = decompose wmax in
+    let e = bit_length ms - 1 + me in
+    let t0 = 63 - bit_length m64 - e in
+    let a = Array.fold_left (fun acc p -> Int64.add acc (ceil_scaled p t0)) 0L parts in
+    let t = t0 + 63 - bit_length a in
+    let q = Array.map (fun p -> ceil_scaled p t) parts in
+    let total = Array.fold_left Int64.add 0L q in
+    (* The first index of the largest mass takes the padding that makes the total a multiple of m. *)
+    let big = ref 0 in
+    Array.iteri (fun i x -> if Int64.unsigned_compare x q.(!big) > 0 then big := i) q;
+    let s = Int64.unsigned_div (Int64.pred (Int64.add total m64)) m64 in
+    q.(!big) <- Int64.add q.(!big) (Int64.sub (Int64.mul s m64) total);
+    let alias = Array.init m Fun.id in
+    let full l = Int64.unsigned_compare q.(l) s >= 0 in
+    let next k =
+      let k = ref k in
+      while !k < m && not (full !k) do
+        incr k
+      done;
+      !k
+    in
+    (* Vose's pairing in place: the first full column [l] fills each short column. *)
+    let l = ref (next 0) in
+    for i = 0 to m - 1 do
+      let j = ref i in
+      while !j <= i && not (full !j) do
+        alias.(!j) <- !l;
+        q.(!l) <- Int64.sub q.(!l) (Int64.sub s q.(!j));
+        j := !l;
+        if not (full !l) then l := next (!l + 1)
+      done
+    done;
+    let cut = A1.create Bigarray.int64 Bigarray.c_layout m in
+    let al = A1.create Bigarray.int32 Bigarray.c_layout m in
+    Array.iteri
+      (fun i x ->
+        cut.{i} <- x;
+        al.{i} <- Int32.of_int alias.(i))
+      q;
+    { m; capacity = s; cut; alias = al }
+
+  let size t = t.m
+  let capacity t = t.capacity
+  let cut t i = t.cut.{i}
+  let alias t i = Int32.to_int t.alias.{i} land 0xffff_ffff
+
+  (* The column from the high word of [r m], and the low word scaled by the capacity against the
+     column's cut. *)
+  let[@inline] index t r =
+    let m = Int64.of_int t.m in
+    let j = Int64.to_int (mulhi64 r m) in
+    if Int64.unsigned_compare (mulhi64 (Int64.mul r m) t.capacity) (A1.unsafe_get t.cut j) < 0 then j
+    else Int32.to_int (A1.unsafe_get t.alias j) land 0xffff_ffff
+end
+
+let choice t table =
+  let x, t = u64 t in
+  (Choice.index table x, t)
+
 (* ---- Normals and exponentials, scalar ------------------------------------------------ *)
 
 (* The ziggurat of Appendix A on the 64-bit draw with words [lo] and [hi]. The bits 0 to 9 of
@@ -319,6 +424,7 @@ module type Fills = sig
   val fill_exponential : ?off:int -> ?len:int -> t -> f64_array -> t
   val fill_below32 : ?off:int -> ?len:int -> t -> range:int -> u32_array -> t
   val fill_below64 : ?off:int -> ?len:int -> t -> range:int64 -> u64_array -> t
+  val fill_choice : ?off:int -> ?len:int -> t -> Choice.t -> u32_array -> t
 
   module Float_array : sig
     val fill_float : ?off:int -> ?len:int -> t -> Float.Array.t -> t
@@ -345,6 +451,22 @@ let fill_with t ~w ~n f =
   let t' = advance t alo (n * w) in
   if n > 0 then f (word_at t.hi alo);
   t'
+
+(* Element [i] is the index of draw [i] of the u64 fill [fill_u64], with no retry. The draws come
+   in blocks that stay in cache. An empty fill aligns the position, as the u64 fill does. *)
+let fill_choice_with (fill_u64 : ?off:int -> ?len:int -> t -> u64_array -> t) ?off ?len t table (a : u32_array) =
+  let off, n = range_of "fill_choice" (A1.dim a) off len in
+  let raw = A1.create Bigarray.int64 Bigarray.c_layout (Int.min n 4096) in
+  let t = ref (if n = 0 then fill_u64 ~len:0 t raw else t) and at = ref 0 in
+  while !at < n do
+    let k = Int.min (A1.dim raw) (n - !at) in
+    t := fill_u64 ~off:0 ~len:k !t raw;
+    for j = 0 to k - 1 do
+      A1.unsafe_set a (off + !at + j) (Int32.of_int (Choice.index table (A1.unsafe_get raw j)))
+    done;
+    at := !at + k
+  done;
+  !t
 
 module Pure = struct
   (* Rows of a fill of [n] elements of [32 lsl sh] bits from the 32-bit word [word0], which is
@@ -421,6 +543,8 @@ module Pure = struct
       at := !at + b
     done;
     !t
+
+  let fill_choice ?off ?len t table a = fill_choice_with fill_u64 ?off ?len t table a
 
   module Float_array = struct
     let fill_float ?off ?len t a =
@@ -565,6 +689,8 @@ let fill_below32 ?off ?len t ~range (a : u32_array) =
 let fill_below64 ?off ?len t ~range (a : u64_array) =
   let off, n = range_of "fill_below64" (A1.dim a) off len in
   if n = 0 then t else fill_with t ~w:64 ~n (fun word0 -> c_fill_below64 t.ctx word0 a off n range)
+
+let fill_choice ?off ?len t table a = fill_choice_with fill_u64 ?off ?len t table a
 
 module Float_array = struct
   let fill_float ?off ?len t a =

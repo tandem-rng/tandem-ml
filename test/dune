@@ -1,6 +1,7 @@
 (tests
- (names vectors streams derived)
- (modules vectors streams derived vectors_data derived_data)
+ (names vectors streams derived conformance)
+ (modules vectors streams derived conformance vectors_data)
  (libraries tandem alcotest)
  (deps
-  (glob_files data/*.bin)))
+  (glob_files data/*.bin)
+  (glob_files conformance/*.json)))

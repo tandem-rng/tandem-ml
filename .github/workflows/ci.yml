@@ -24,3 +24,12 @@ jobs:
           ocaml-compiler: ${{ matrix.ocaml }}
       - run: opam install . --deps-only --with-test
       - run: opam exec -- dune build @all @runtest
+  conformance:
+    name: conformance files match the spec
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - run: |
+          git clone -q https://github.com/tandem-rng/spec ../tandem-spec
+          git -C ../tandem-spec checkout -q f4205457e1e2ed19e655e36820015d7bdcf037dd
+          for f in test/conformance/*.json; do cmp "$f" "../tandem-spec/conformance/$(basename "$f")"; done

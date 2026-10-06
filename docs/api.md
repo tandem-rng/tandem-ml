@@ -20,6 +20,11 @@ let g, kids = Tandem.fork g 4
 - Bounded integers: `below32`, `below64`, `below`, `between`, `fill_below32`, `fill_below64`.
 - Normals: `normal`, `fill_normal`.
 - Exponentials: `exponential`, `fill_exponential`.
+- Weighted choice, Appendix C: `Choice.create` builds the alias table of a `float array` in exact
+  integers and raises `Invalid_argument` unless the weights are finite, not negative and not all
+  zero. `choice` and `fill_choice` return indices, one 64-bit draw each with no retry, so a fill cut
+  anywhere equals the whole fill. `Choice.size`, `capacity`, `cut` and `alias` expose the table.
+  The fills run over the C or the pure 64-bit fill.
 - Fills into `Bigarray.Array1` of `int32`, `int64`, `float64`, with `?off` and `?len`.
 - Fills into `Float.Array`: `Tandem.Float_array`.
 - `Tandem.Pure`: the same fills in OCaml alone, the reference for the C fills.
@@ -29,7 +34,7 @@ let g, kids = Tandem.fork g 4
   `K`) plus a cache of the current 1024-bit row that its copies share. Every draw returns the
   value and the successor generator.
 - A bound of 0 returns 0 after one draw.
-- A plain or normal fill of 0 elements aligns the position. Bounded and exponential fills of 0
+- A plain, normal or choice fill of 0 elements aligns the position. Bounded and exponential fills of 0
   elements move nothing.
 - `Tandem.State` has the shape of `Random.State`. `State.make` takes any int array: the first
   integer is the seed and each further integer `i` takes `split i`.

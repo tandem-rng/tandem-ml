@@ -107,6 +107,41 @@ val below : t -> int -> int * t
 val between : t -> lo:int -> hi:int -> int * t
 (** In \[lo, hi), with the draw width chosen from [hi - lo] as {!below} does. *)
 
+(** {2 Weighted choice}
+
+    Appendix C of the specification. An alias table is built from the weights in exact integers
+    and draws nothing. A draw takes one 64-bit draw, with no retry, and returns an index in
+    \[0, m) with probability proportional to its weight. The table and the indices equal tandem-c
+    bit for bit. *)
+
+module Choice : sig
+  type t
+
+  val create : float array -> t
+  (** The table of the weights. A weight of [-0.] is zero.
+
+      @raise Invalid_argument unless there are 1 to 2^32 - 1 weights, all finite and not negative,
+      and at least one is positive. *)
+
+  val size : t -> int
+  (** The number of weights [m]. *)
+
+  val capacity : t -> int64
+  (** The column capacity [S], as an unsigned 64-bit integer. *)
+
+  val cut : t -> int -> int64
+  (** [cut t j] is the part of column [j] that keeps index [j], an unsigned 64-bit integer. *)
+
+  val alias : t -> int -> int
+  (** The index that column [j] gives the rest of its capacity to. *)
+
+  val index : t -> int64 -> int
+  (** The index of one 64-bit draw. *)
+end
+
+val choice : t -> Choice.t -> int * t
+(** An index from one 64-bit draw. It equals element 0 of {!fill_choice}. *)
+
 (** {2 Normals and exponentials}
 
     Normals follow the 1024-layer ziggurat on one 64-bit draw, exponentials [-ln (1 - u)] on one
@@ -128,7 +163,7 @@ val exponential : t -> float * t
     after it. A fill equals the same number of scalar draws, so a fill cut at any element
     equals the whole fill.
 
-    A plain or normal fill of 0 elements returns the position aligned to the element width. The
+    A plain, normal or choice fill of 0 elements returns the position aligned to the element width. The
     bounded and exponential fills of 0 elements move nothing. A normal fill consumes [len]
     64-bit draws, element [i] from draw [i].
 
@@ -152,6 +187,10 @@ module type Fills = sig
 
   val fill_below64 : ?off:int -> ?len:int -> t -> range:int64 -> u64_array -> t
   (** As {!fill_below32} on 64-bit draws with the purpose [0x424c573634]. *)
+
+  val fill_choice : ?off:int -> ?len:int -> t -> Choice.t -> u32_array -> t
+  (** Element [i] is the index of draw [i] of the 64-bit fill, with no retry, so a fill cut at any
+      element equals the whole fill. An empty fill aligns the position to 64 bits. *)
 
   (** Fills into a [Float.Array], with the values of the bigarray fills of the same name. *)
   module Float_array : sig
