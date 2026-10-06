@@ -88,8 +88,6 @@ let[@inline] read_u64 (ctx : Engine.ctx) w =
   Engine.load ctx (w lsr 5);
   row_u64 ctx.st (w land 31)
 
-let[@inline] read_f64 ctx w = f64_of_u64 (read_u64 ctx w)
-
 (* The scalar draws read [ctx.buf], which one C fill refills. A noalloc call keeps the caller's
    values in callee-saved registers, where an OCaml call would spill them on every draw. *)
 external refill : Engine.ctx -> (int[@untagged]) -> unit = "tandem_ml_refill_byte" "tandem_ml_refill"
