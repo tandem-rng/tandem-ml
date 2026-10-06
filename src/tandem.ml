@@ -72,40 +72,60 @@ let[@inline] advance t alo bits = { t with hi = end_hi t.hi alo bits; lo = (alo 
 
 (* ---- Scalar draws -------------------------------------------------------------------- *)
 
-(* Reads at a position, shared by the draws and by [State]. *)
-let[@inline] read32 ctx w =
+(* A reader maps the index [w] of a 32-bit word to the value that starts there. *)
+
+let[@inline] f64_of_u64 x = float_of_int (Int64.to_int (Int64.shift_right_logical x 11)) *. 0x1p-53
+
+(* The 64-bit value at the even word [e] of the row in [st]. *)
+let[@inline] row_u64 st e = Int64.logor (Engine.raw st e) (Int64.shift_left (Engine.raw st (e + 1)) 32)
+
+(* The readers of [Pure], through the row cache that Engine steps in OCaml. *)
+let[@inline] read32 (ctx : Engine.ctx) w =
   Engine.load ctx (w lsr 5);
-  Engine.word ctx (w land 31)
+  Engine.word ctx.st (w land 31)
 
-let[@inline] read_bool ctx hi lo = (read32 ctx (word_at hi lo) lsr (lo land 31)) land 1 = 1
-
-let[@inline] read_u64 ctx hi alo =
-  let w = word_at hi alo in
+let[@inline] read_u64 (ctx : Engine.ctx) w =
   Engine.load ctx (w lsr 5);
-  let i = w land 31 in
-  Int64.logor (Int64.of_int (Engine.word ctx i)) (Int64.shift_left (Int64.of_int (Engine.word ctx (i + 1))) 32)
+  row_u64 ctx.st (w land 31)
 
-let[@inline] to_f64 lo hi = float_of_int ((hi lsl 21) lor (lo lsr 11)) *. 0x1p-53
+let[@inline] read_f64 ctx w = f64_of_u64 (read_u64 ctx w)
 
-let[@inline] read_f64 ctx hi alo =
-  let w = word_at hi alo in
-  Engine.load ctx (w lsr 5);
-  let i = w land 31 in
-  to_f64 (Engine.word ctx i) (Engine.word ctx (i + 1))
+(* The scalar draws read [ctx.buf], which one C fill refills. A noalloc call keeps the caller's
+   values in callee-saved registers, where an OCaml call would spill them on every draw. *)
+external refill : Engine.ctx -> (int[@untagged]) -> unit = "tandem_ml_refill_byte" "tandem_ml_refill"
+  [@@noalloc]
+
+external get32 : Bytes.t -> int -> int32 = "%caml_bytes_get32u"
+
+(* The buffer index of word [w]. The two words of a 64-bit value share a row, so one check
+   covers both. *)
+let[@inline] slot (ctx : Engine.ctx) w =
+  if (w - ctx.base) land lnot (Engine.buf_words - 1) <> 0 then refill ctx w;
+  w - ctx.base
+
+let[@inline] fast32 (ctx : Engine.ctx) w = Int32.to_int (get32 ctx.buf (slot ctx w lsl 2)) land mask
+
+(* The 64-bit value at the even word [w], in one load. *)
+let[@inline] fast_u64 (ctx : Engine.ctx) w =
+  let x = Engine.get64 ctx.buf (slot ctx w lsl 2) in
+  if Sys.big_endian then Int64.logor (Int64.shift_left x 32) (Int64.shift_right_logical x 32) else x
+
+let[@inline] fast_f64 ctx w = f64_of_u64 (fast_u64 ctx w)
+
+let[@inline] read_bool ctx hi lo = (fast32 ctx (word_at hi lo) lsr (lo land 31)) land 1 = 1
+
+let[@inline] draw32 read t =
+  let alo = align t.lo 32 in
+  (read t.ctx (word_at t.hi alo), advance t alo 32)
+
+let[@inline] draw64 read t =
+  let alo = align t.lo 64 in
+  (read t.ctx (word_at t.hi alo), advance t alo 64)
 
 let[@inline] bool t = (read_bool t.ctx t.hi t.lo, advance t t.lo 1)
-
-let[@inline] u32 t =
-  let alo = align t.lo 32 in
-  (read32 t.ctx (word_at t.hi alo), advance t alo 32)
-
-let[@inline] u64 t =
-  let alo = align t.lo 64 in
-  (read_u64 t.ctx t.hi alo, advance t alo 64)
-
-let[@inline] float t =
-  let alo = align t.lo 64 in
-  (read_f64 t.ctx t.hi alo, advance t alo 64)
+let[@inline] u32 t = draw32 fast32 t
+let[@inline] u64 t = draw64 fast_u64 t
+let[@inline] float t = draw64 fast_f64 t
 
 (* ---- Derived generators -------------------------------------------------------------- *)
 
@@ -144,21 +164,27 @@ let fork t n =
 let purpose_below32 = 0x42_4c57_3332
 let purpose_below64 = 0x42_4c57_3634
 
-let rec below32 t range =
+(* Lemire's multiply and reject. The threshold is below [range], so a low half at or above
+   [range] accepts without the division. *)
+let[@inline] below32_with draw t range =
   if range < 0 || range > 1 lsl 32 then invalid_arg "Tandem.below32: the range is 0 to 2^32";
-  let x, t = u32 t in
+  let x, t = draw t in
   if range = 0 then (0, t)
   else begin
-    let rejected = ((1 lsl 32) - range) mod range in
-    lemire32 t x range rejected
+    (* The low 32 bits of the product are exact in an int. *)
+    let x = ref x and t = ref t in
+    if (!x * range) land mask < range then begin
+      let rejected = ((1 lsl 32) - range) mod range in
+      while (!x * range) land mask < rejected do
+        let x', t' = draw !t in
+        x := x';
+        t := t'
+      done
+    end;
+    (Int64.to_int (Int64.shift_right_logical (Int64.mul (Int64.of_int !x) (Int64.of_int range)) 32), !t)
   end
 
-and lemire32 t x range rejected =
-  let m = Int64.mul (Int64.of_int x) (Int64.of_int range) in
-  if Int64.to_int m land mask >= rejected then (Int64.to_int (Int64.shift_right_logical m 32), t)
-  else
-    let x, t = u32 t in
-    lemire32 t x range rejected
+let[@inline] below32 t range = below32_with u32 t range
 
 let mulhi64 a b =
   let m = 0xffff_ffffL in
@@ -175,19 +201,21 @@ let mulhi64 a b =
     (Int64.add (Int64.add p11 (Int64.shift_right_logical p01 32)) (Int64.shift_right_logical p10 32))
     (Int64.shift_right_logical mid 32)
 
-let below64 t range =
-  let x, t = u64 t in
+let below64_with draw t range =
+  let x, t = draw t in
   if Int64.equal range 0L then (0L, t)
   else begin
     let rejected = Int64.unsigned_rem (Int64.neg range) range in
     let rec go x t =
       if Int64.unsigned_compare (Int64.mul x range) rejected >= 0 then (mulhi64 x range, t)
       else
-        let x, t = u64 t in
+        let x, t = draw t in
         go x t
     in
     go x t
   end
+
+let below64 t range = below64_with u64 t range
 
 let below t range =
   if range < 0 then invalid_arg "Tandem.below: the range is not negative";
@@ -219,14 +247,26 @@ let[@inline] zig_inside lo ra = ra < Array.unsafe_get Zig_tables.k (lo land 1023
 
 (* A draw outside the inner rectangles continues on the fallback stream of its global draw
    index [g], from the key of [ctx] alone. OCaml never fuses a product into a sum, so only
-   [neg2_log] fuses, as the spec requires. *)
+   [neg2_log] fuses, as the spec requires. The fallback draws 64 bits at a time from position
+   0. Draw [k] below 16 lies in row 0, lane [k / 2], so only the lanes it reaches are seeded:
+   one F each, not eight. *)
 let[@inline never] zig_miss ctx g lo hi =
-  let f = ref (split_u64 (purpose_u64 { ctx; hi = 0; lo = 0 } purpose_normal64) (Int64.of_int g)) in
-  let next_float () =
-    let u, f' = float !f in
-    f := f';
-    u
+  let f = split_u64 (purpose_u64 { ctx; hi = 0; lo = 0 } purpose_normal64) (Int64.of_int g) in
+  let st = Engine.make_state () and lanes = ref 0 and d = ref 0 in
+  let next_u64 () =
+    let k = !d in
+    incr d;
+    if k >= 16 then read_u64 f.ctx (2 * k)
+    else begin
+      while !lanes <= k lsr 1 do
+        Engine.seed_lane st f.ctx.key 0 !lanes;
+        Engine.step st !lanes;
+        incr lanes
+      done;
+      row_u64 st (2 * k)
+    end
   in
+  let next_float () = f64_of_u64 (next_u64 ()) in
   let rec layer lo hi =
     let i = lo land 1023 and ra = zig_magnitude lo hi in
     let x = zig_x lo ra in
@@ -246,8 +286,7 @@ let[@inline never] zig_miss ctx g lo hi =
       let y = y0 +. (u *. (Array.unsafe_get Zig_tables.y (i + 1) -. y0)) in
       if -0.5 *. Logarithm.neg2_log y < -0.5 *. (x *. x) then x
       else
-        let r, f' = u64 !f in
-        f := f';
+        let r = next_u64 () in
         layer (Int64.to_int r land mask) (Int64.to_int (Int64.shift_right_logical r 32))
   in
   layer lo hi
@@ -256,16 +295,17 @@ let[@inline] zig ctx g lo hi =
   let ra = zig_magnitude lo hi in
   if zig_inside lo ra then zig_x lo ra else zig_miss ctx g lo hi
 
-(* The normal at the aligned low limb [alo]. *)
-let[@inline] read_normal ctx hi alo =
-  let w = word_at hi alo in
-  Engine.load ctx (w lsr 5);
-  let i = w land 31 in
-  zig ctx (w lsr 1) (Engine.word ctx i) (Engine.word ctx (i + 1))
+external c_normal : Engine.ctx -> (int[@untagged]) -> (float[@unboxed])
+  = "tandem_ml_normal_byte" "tandem_ml_normal" [@@noalloc]
 
-let normal t =
-  let alo = align t.lo 64 in
-  (read_normal t.ctx t.hi alo, advance t alo 64)
+(* The scalar draws take a miss to tandem.c, which runs the fallback far faster. The layer and
+   sign need only the low bits of [lo]. *)
+let[@inline] fast_normal ctx w =
+  let x = fast_u64 ctx w in
+  let lo = Int64.to_int x and ra = Int64.to_int (Int64.shift_right_logical x 11) in
+  if zig_inside lo ra then zig_x lo ra else c_normal ctx w
+
+let[@inline] normal t = draw64 fast_normal t
 
 let exponential t =
   let u, t = float t in
@@ -310,16 +350,17 @@ let fill_with t ~w ~n f =
 
 module Pure = struct
   (* Rows of a fill of [n] elements of [32 lsl sh] bits from the 32-bit word [word0], which is
-     a multiple of the element width. [f first count dst] writes [count] elements, the first at
-     index [first] of the loaded row and the first output at [dst]. *)
-  let iter_rows ctx ~word0 ~sh ~n f =
+     a multiple of the element width. [f st first count dst] writes [count] elements, the first
+     at index [first] of the row in [st] and the first output at [dst]. Inlined, so that each
+     fill gets its own loop. *)
+  let[@inline] iter_rows (ctx : Engine.ctx) ~word0 ~sh ~n f =
     let per = 32 lsr sh in
     let i = ref 0 and w = ref word0 in
     while !i < n do
       Engine.load ctx (!w lsr 5);
       let first = (!w land 31) lsr sh in
-      let cnt = min (per - first) (n - !i) in
-      f first cnt !i;
+      let cnt = Int.min (per - first) (n - !i) in
+      f ctx.st first cnt !i;
       i := !i + cnt;
       w := !w + (cnt lsl sh)
     done
@@ -327,49 +368,46 @@ module Pure = struct
   let fill_u32 ?off ?len t (a : u32_array) =
     let off, n = range_of "fill_u32" (A1.dim a) off len in
     fill_with t ~w:32 ~n (fun word0 ->
-        iter_rows t.ctx ~word0 ~sh:0 ~n (fun first cnt dst ->
+        iter_rows t.ctx ~word0 ~sh:0 ~n (fun st first cnt dst ->
             for k = 0 to cnt - 1 do
-              A1.unsafe_set a (off + dst + k) (Int32.of_int (Engine.word t.ctx (first + k)))
+              A1.unsafe_set a (off + dst + k) (Int64.to_int32 (Engine.raw st (first + k)))
             done))
 
   let fill_u64 ?off ?len t (a : u64_array) =
     let off, n = range_of "fill_u64" (A1.dim a) off len in
     fill_with t ~w:64 ~n (fun word0 ->
-        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun st first cnt dst ->
             for k = 0 to cnt - 1 do
               let e = (first + k) lsl 1 in
-              let lo = Engine.word t.ctx e and hi = Engine.word t.ctx (e + 1) in
-              A1.unsafe_set a (off + dst + k)
-                (Int64.logor (Int64.of_int lo) (Int64.shift_left (Int64.of_int hi) 32))
+              A1.unsafe_set a (off + dst + k) (row_u64 st e)
             done))
 
   let fill_float ?off ?len t (a : f64_array) =
     let off, n = range_of "fill_float" (A1.dim a) off len in
     fill_with t ~w:64 ~n (fun word0 ->
-        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun st first cnt dst ->
             for k = 0 to cnt - 1 do
               let e = (first + k) lsl 1 in
-              A1.unsafe_set a (off + dst + k) (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
+              A1.unsafe_set a (off + dst + k) (f64_of_u64 (row_u64 st e))
             done))
 
   (* The same on a [Float.Array] region that the caller checked. *)
   let uniforms t (a : Float.Array.t) off n =
     fill_with t ~w:64 ~n (fun word0 ->
-        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun st first cnt dst ->
             for k = 0 to cnt - 1 do
               let e = (first + k) lsl 1 in
-              Float.Array.unsafe_set a (off + dst + k)
-                (to_f64 (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
+              Float.Array.unsafe_set a (off + dst + k) (f64_of_u64 (row_u64 st e))
             done))
 
   (* Element [i] of a normal fill is the ziggurat on draw [i] of the u64 fill. *)
   let[@inline] normals t n set =
     fill_with t ~w:64 ~n (fun word0 ->
-        iter_rows t.ctx ~word0 ~sh:1 ~n (fun first cnt dst ->
+        iter_rows t.ctx ~word0 ~sh:1 ~n (fun st first cnt dst ->
             let g = (word0 lsr 1) + dst in
             for k = 0 to cnt - 1 do
               let e = (first + k) lsl 1 in
-              set (dst + k) (zig t.ctx (g + k) (Engine.word t.ctx e) (Engine.word t.ctx (e + 1)))
+              set (dst + k) (zig t.ctx (g + k) (Engine.word st e) (Engine.word st (e + 1)))
             done))
 
   (* Exponential fills draw the uniforms in blocks that stay in cache and map them in place. An
@@ -379,7 +417,7 @@ module Pure = struct
   let exponentials t a off n =
     let t = ref t and at = ref 0 in
     while !at < n do
-      let b = min block (n - !at) in
+      let b = Int.min block (n - !at) in
       t := uniforms !t a (off + !at) b;
       Logarithm.exponential_block a (off + !at) b;
       at := !at + b
@@ -402,10 +440,10 @@ module Pure = struct
 
   (* A bigarray target goes through a block of floats. *)
   let via_floats map t (a : f64_array) off n =
-    let floats = Float.Array.create (min block n) in
+    let floats = Float.Array.create (Int.min block n) in
     let t = ref t and at = ref 0 in
     while !at < n do
-      let b = min block (n - !at) in
+      let b = Int.min block (n - !at) in
       t := map !t floats 0 b;
       for i = 0 to b - 1 do
         A1.unsafe_set a (off + !at + i) (Float.Array.unsafe_get floats i)
@@ -440,7 +478,7 @@ module Pure = struct
           let m = Int64.mul (Int64.of_int x) (Int64.of_int range) in
           let v =
             if Int64.to_int m land mask >= rejected then Int64.to_int (Int64.shift_right_logical m 32)
-            else fst (below32 (fallback t purpose_below32 (g0 + i)) range)
+            else fst (below32_with (draw32 read32) (fallback t purpose_below32 (g0 + i)) range)
           in
           A1.unsafe_set a (off + i) (Int32.of_int v)
         done
@@ -461,7 +499,7 @@ module Pure = struct
           let x = A1.unsafe_get a (off + i) in
           let v =
             if Int64.unsigned_compare (Int64.mul x range) rejected >= 0 then mulhi64 x range
-            else fst (below64 (fallback t purpose_below64 (g0 + i)) range)
+            else fst (below64_with (draw64 read_u64) (fallback t purpose_below64 (g0 + i)) range)
           in
           A1.unsafe_set a (off + i) v
         done
@@ -548,13 +586,13 @@ end
 
 module Spec = struct
   let step ~o ~h =
-    let st = Array.make 64 0 in
+    let st = Engine.make_state () in
     for w = 0 to 3 do
-      st.(w lsl 3) <- o.(w);
-      st.(32 + (w lsl 3)) <- h.(w)
+      Engine.set st (w lsl 3) o.(w);
+      Engine.set st (32 + (w lsl 3)) h.(w)
     done;
     Engine.step st 0;
-    (Array.init 4 (fun w -> st.(w lsl 3)), Array.init 4 (fun w -> st.(32 + (w lsl 3))))
+    (Array.init 4 (fun w -> Engine.get st (w lsl 3)), Array.init 4 (fun w -> Engine.get st (32 + (w lsl 3))))
 
   let f_keyed key ~counter ~domain ~aux =
     let lo, hi = limbs counter in
@@ -576,10 +614,27 @@ end
 
 module State = struct
   type g = t
-  type t = { ctx : Engine.ctx; mutable hi : int; mutable lo : int }
 
-  let of_generator (g : g) = { ctx = g.ctx; hi = g.hi; lo = g.lo }
-  let generator s : g = { ctx = s.ctx; hi = s.hi; lo = s.lo }
+  (* The limbs of the position are int64 slots of [pos], [hi] at byte 0 and [lo] at byte 8.
+     OCaml 5 on arm64 assigns a mutable field by a release store, which here doubled the time
+     of a draw, as each draw reads back the last one's store. A Bytes store is a plain store. *)
+  type t = { ctx : Engine.ctx; pos : Bytes.t }
+
+  let[@inline] hi s = Int64.to_int (Engine.get64 s.pos 0)
+  let[@inline] lo s = Int64.to_int (Engine.get64 s.pos 8)
+  let[@inline] set_hi s x = Engine.set64 s.pos 0 (Int64.of_int x)
+  let[@inline] set_lo s x = Engine.set64 s.pos 8 (Int64.of_int x)
+
+  let[@inline] set s (g : g) =
+    set_hi s g.hi;
+    set_lo s g.lo
+
+  let of_generator (g : g) =
+    let s = { ctx = g.ctx; pos = Bytes.create 16 } in
+    set s g;
+    s
+
+  let generator s : g = { ctx = s.ctx; hi = hi s; lo = lo s }
   let make_seed ?chunk_length z = of_generator (seed ?chunk_length z)
 
   let make a =
@@ -590,61 +645,56 @@ module State = struct
     done;
     of_generator !g
 
-  let copy s = { s with hi = s.hi }
+  let copy s = { s with pos = Bytes.copy s.pos }
 
-  let[@inline] set s (g : g) =
-    s.hi <- g.hi;
-    s.lo <- g.lo
-
-  (* The draws below move the position in place, so that they allocate nothing. *)
+  (* The draws below move the position in place, so that they allocate nothing. A draw of at
+     most 64 bits carries at most one into the high limb, and only that case stores it. *)
   let[@inline] move s alo w =
-    s.hi <- end_hi s.hi alo w;
-    s.lo <- (alo + w) land mask
+    let lo = alo + w in
+    if lo <= mask then set_lo s lo
+    else begin
+      set_hi s (end_hi (hi s) alo w);
+      set_lo s (lo land mask)
+    end
 
   let[@inline] next32 s =
-    let alo = align s.lo 32 in
-    let x = read32 s.ctx (word_at s.hi alo) in
+    let alo = align (lo s) 32 in
+    let x = fast32 s.ctx (word_at (hi s) alo) in
     move s alo 32;
     x
 
-  let[@inline] next_float s =
-    let alo = align s.lo 64 in
-    let x = read_f64 s.ctx s.hi alo in
+  let[@inline] next64 read s =
+    let alo = align (lo s) 64 in
+    let x = read s.ctx (word_at (hi s) alo) in
     move s alo 64;
     x
 
+  let[@inline] next_float s = next64 fast_f64 s
   let[@inline] bits s = next32 s lsr 2
   let[@inline] bits32 s = Int32.of_int (next32 s)
-
-  let[@inline] bits64 s =
-    let alo = align s.lo 64 in
-    let x = read_u64 s.ctx s.hi alo in
-    move s alo 64;
-    x
+  let[@inline] bits64 s = next64 fast_u64 s
 
   let[@inline] bool s =
-    let x = read_bool s.ctx s.hi s.lo in
-    move s s.lo 1;
+    let lo = lo s in
+    let x = read_bool s.ctx (hi s) lo in
+    move s lo 1;
     x
 
   let[@inline] float s scale = scale *. next_float s
 
-  let normal s =
-    let alo = align s.lo 64 in
-    let x = read_normal s.ctx s.hi alo in
-    move s alo 64;
-    x
-
+  let normal s = next64 fast_normal s
   let exponential s = Logarithm.exponential (next_float s)
 
   (* [below32] for a bound below 2^30, whose products fit in an int. *)
   let int s bound =
     if bound <= 0 || bound > 0x3fff_ffff then invalid_arg "Random.int";
-    let rejected = ((1 lsl 32) - bound) mod bound in
     let m = ref (next32 s * bound) in
-    while !m land mask < rejected do
-      m := next32 s * bound
-    done;
+    if !m land mask < bound then begin
+      let rejected = ((1 lsl 32) - bound) mod bound in
+      while !m land mask < rejected do
+        m := next32 s * bound
+      done
+    end;
     !m lsr 32
 
   let draw s f =
