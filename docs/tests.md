@@ -8,7 +8,7 @@ dune build @all @runtest
 
 - Every spec vector, and long stream dumps from the Julia implementation.
 - The conformance files of the spec, byte copies in `test/conformance`, read by
-  `test/conformance.ml`, which demonstrates every item of the spec's `conformance/CHECKLIST.md`
+  `test/conformance.ml`, which demonstrates every item of the spec's `conformance/CHECKLIST.md` at b31af72
   that the port offers. Every case of the bounded, normal, exponential and weighted choice files
   runs through the C fills, `Tandem.Pure`, both array kinds, the scalar draws and `Tandem.State`,
   and cut at elements 1, 7, 20, 21 and n - 1, bit for bit with its end position. The checks cover
@@ -29,7 +29,7 @@ dumps as fills and scalar draws), `conformance` and `derived` (everything else a
 
 ## Fixtures
 
-`test/conformance/*.json` are byte copies of tandem-spec f420545 `conformance/*.json`, and CI
+`test/conformance/*.json` are byte copies of tandem-spec b31af72 `conformance/*.json`, and CI
 compares them with the spec. `python3 tools/gen_vectors.py ../tandem-spec/vectors.json >
 test/vectors_data.ml` converts the spec vectors. The f64 part of tandem-c's
 `tools/dump_exponentials.c` hashes to `0x8cb6728a73181814`, and the full dump to
