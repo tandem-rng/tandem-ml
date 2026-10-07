@@ -44,8 +44,8 @@ let fnv h (d : Tandem.f64_array) =
 let fnv0 = 0xcbf29ce484222325L
 
 (* FNV-1a of the bytes of tandem-c's tools/dump_normals.c, and of the f64 part of
-   tools/dump_exponentials.c, from tandem-c b049384 whose full exponential dump hashes to
-   0x47f8f98297d94ee2. *)
+   tools/dump_exponentials.c, from tandem-c 1c75956 whose full exponential dump hashes to
+   0x1c761a2d471073c2. *)
 let long_fill_hash ~count fill expected () =
   let d = f64_array count in
   let h = ref fnv0 in
