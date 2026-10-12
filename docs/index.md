@@ -7,7 +7,7 @@ vendored tandem-c through C stubs, with a pure OCaml fallback in `Tandem.Pure`.
 - [API](api.md): the generator, its draws and fills, `Tandem.State` and parallel use.
 - [Design](design.md): the C fills, bounded integers, normals and exponentials.
 - [Tests](tests.md): what the suites check, the fixtures, and what CI runs.
-- [Speed](speed.md): Apple M4 figures against `Random.State`.
+- [Performance](speed.md): Apple M4 figures against `Random.State`.
 
 ## Install
 

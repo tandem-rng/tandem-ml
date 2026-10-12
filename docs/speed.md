@@ -1,4 +1,4 @@
-# Speed
+# Performance
 
 `dune exec --release bench/bench.exe` produces the figures. Every figure is GiB/s of output.
 
